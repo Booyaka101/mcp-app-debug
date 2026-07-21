@@ -1,5 +1,8 @@
 import { build } from "esbuild";
-import { cp } from "node:fs/promises";
+import { cp, readFile } from "node:fs/promises";
+
+const pkg = JSON.parse(await readFile(new URL("./package.json", import.meta.url), "utf-8"));
+const define = { __APP_VERSION__: JSON.stringify(pkg.version) };
 
 // Node CLI — deps stay external (installed via npm), ESM output.
 await build({
@@ -13,6 +16,7 @@ await build({
   banner: { js: "#!/usr/bin/env node" },
   sourcemap: false,
   logLevel: "info",
+  define,
 });
 
 // Browser bundles — App Bridge + panel fully inlined so the published
@@ -30,6 +34,7 @@ for (const [entry, outfile] of [
     target: "es2022",
     sourcemap: false,
     logLevel: "info",
+    define,
   });
 }
 

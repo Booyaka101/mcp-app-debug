@@ -11,15 +11,28 @@ import { runDebugHost } from "./host.js";
 
 const program = new Command();
 
+function collectHeader(value: string, previous: Record<string, string>): Record<string, string> {
+  const idx = value.indexOf(":");
+  if (idx <= 0) {
+    throw new InvalidArgumentError('expected "Name: value" (e.g. --header "Authorization: Bearer …")');
+  }
+  return { ...previous, [value.slice(0, idx).trim()]: value.slice(idx + 1).trim() };
+}
+
 program
   .name("mcp-app-debug")
   .description(
     "Debug host for MCP Apps: renders a server's app locally with full postMessage protocol visibility and automated diagnostics.",
   )
-  .version("0.1.0")
-  .argument("<server-url>", "MCP server URL (Streamable HTTP, e.g. http://localhost:3001/mcp)")
+  .version(__APP_VERSION__)
+  .argument(
+    "[target...]",
+    "MCP server URL (Streamable HTTP/SSE, e.g. http://localhost:3001/mcp), or with --stdio the server command line",
+  )
+  .option("--stdio", "target is a stdio server command (put it after --, e.g. --stdio -- npx -y my-server)")
+  .option("--header <name:value>", "extra HTTP header, repeatable (e.g. \"Authorization: Bearer …\")", collectHeader, {})
   .option("--tool <name>", "tool to render (default: first tool declaring _meta.ui.resourceUri)")
-  .option("--args <json>", "tool arguments as JSON (default: inputSchema defaults)")
+  .option("--args <json>", "tool arguments as JSON object (default: inputSchema defaults)")
   .option(
     "--mode <mode>",
     "host capability mode: trusted | strict (also accepts '3p' as an alias of strict)",
@@ -36,12 +49,15 @@ program
     if (!Number.isFinite(n) || n < 3) throw new InvalidArgumentError("must be a number >= 3");
     return n;
   }, 10)
-  .option("--json", "print check results as compact JSON on stdout, exit 1 on failure (implies --headless)")
+  .option("--full-window", "always wait the full observation window (default: end 2 s after all checks pass)")
+  .option("--json", "CI mode: print check results as compact JSON on stdout, exit 1 on failure (implies --headless)")
   .option("--headless", "run the browser headless")
   .option("--headed", "force a visible browser window (overrides the --json default)")
   .option("--no-interact", "do not auto-click a button in the app to provoke an app-initiated tools/call")
   .option("--click <text>", "button text to click inside the app after the handshake")
   .option("--screenshot <path>", "save a PNG of the debug window when checks complete")
+  .option("--video <path>", "record the debug session to a .webm video file")
+  .option("--log-file <path>", "write every protocol log entry as NDJSON (last line is the check report)")
   .addHelpText(
     "after",
     `
@@ -54,6 +70,11 @@ Checks (evaluated after the observation window):
   4. ui/ready notification     ui/notifications/initialized within 5 s
   5. app-initiated tools/call  at least one tools/call FROM the app returned non-error
 
+Exit codes:
+  0  all checks passed
+  1  one or more checks failed (or the server exposes no MCP App at all)
+  2  operational error (bad arguments, could not connect, browser failed)
+
 Notes:
   '3p' is accepted for compatibility but deploymentMode does not exist in the MCP
   Apps SDK (verified against ext-apps 1.7.4); it maps to --mode strict, a host that
@@ -64,9 +85,11 @@ Examples:
   npx mcp-app-debug http://localhost:3001/mcp --tool get-time --click "Get Server Time"
   npx mcp-app-debug http://localhost:3001/mcp --json | jq .
   npx mcp-app-debug http://localhost:3001/mcp --mode 3p
+  npx mcp-app-debug --header "Authorization: Bearer $TOKEN" https://api.example.com/mcp
+  npx mcp-app-debug --stdio -- npx -y @acme/my-mcp-server
 `,
   )
-  .action(async (serverUrl: string, options) => {
+  .action(async (target: string[], options) => {
     const rawMode: string = options.mode;
     const mode = rawMode === "3p" ? "strict" : (rawMode as "trusted" | "strict");
     const modeNote =
@@ -74,18 +97,67 @@ Examples:
         ? "'3p' deploymentMode is not part of the MCP Apps spec/SDK — mapped to strict capability mode"
         : undefined;
 
+    const fail = (msg: string): never => {
+      program.error(msg, { exitCode: 2 });
+      throw new Error(msg); // unreachable — program.error exits
+    };
+
+    let connect;
+    if (options.stdio) {
+      if (target.length === 0) {
+        fail("error: --stdio requires a server command, e.g. mcp-app-debug --stdio -- npx -y my-server");
+      }
+      connect = { kind: "stdio" as const, command: target[0], args: target.slice(1) };
+    } else {
+      if (target.length === 0) fail("error: missing server URL (or use --stdio -- <command>)");
+      if (target.length > 1) {
+        fail(
+          `error: expected one server URL, got ${target.length} arguments ` +
+            `(${target.join(" ")}) — did you mean --stdio -- ${target.join(" ")}?`,
+        );
+      }
+      const raw = target[0];
+      if (!/^https?:\/\//i.test(raw)) {
+        fail(
+          `error: server URL must start with http:// or https:// — got "${raw}"` +
+            (/^[\w.-]+(:\d+)?(\/|$)/.test(raw) ? `\nDid you mean: http://${raw}` : ""),
+        );
+      }
+      try {
+        new URL(raw);
+      } catch {
+        fail(`error: "${raw}" is not a valid URL`);
+      }
+      connect = { kind: "http" as const, url: raw, headers: options.header as Record<string, string> };
+    }
+
+    if (options.args !== undefined) {
+      try {
+        const parsed = JSON.parse(options.args);
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+          fail(`error: --args must be a JSON object, got ${JSON.stringify(parsed)}`);
+        }
+      } catch (e) {
+        if (e instanceof SyntaxError) fail(`error: --args is not valid JSON: ${e.message}`);
+        else throw e;
+      }
+    }
+
     const exitCode = await runDebugHost({
-      serverUrl,
+      connect,
       tool: options.tool,
       args: options.args,
       mode,
       modeNote,
       timeoutSec: options.timeout,
+      fullWindow: Boolean(options.fullWindow),
       json: Boolean(options.json),
       headless: options.headed ? false : Boolean(options.headless || options.json),
       interact: options.interact !== false,
       click: options.click,
       screenshot: options.screenshot,
+      video: options.video,
+      logFile: options.logFile,
     });
     process.exitCode = exitCode;
     // Flush stdout before hard exit — on Windows, process.exit() truncates

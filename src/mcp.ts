@@ -1,6 +1,7 @@
 /**
  * Node-side MCP client: connect (Streamable HTTP with SSE fallback, as in the
- * official basic-host), discover UI-declaring tools, fetch ui:// resources.
+ * official basic-host, or stdio), discover UI-declaring tools, fetch ui://
+ * resources.
  */
 import {
   getToolUiResourceUri,
@@ -8,41 +9,110 @@ import {
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Resource, Tool } from "@modelcontextprotocol/sdk/types.js";
 
-const IMPLEMENTATION = { name: "mcp-app-debug", version: "0.1.0" };
+const IMPLEMENTATION = { name: "mcp-app-debug", version: __APP_VERSION__ };
+const CONNECT_TIMEOUT_MS = 30_000;
+
+export type ConnectTarget =
+  | { kind: "http"; url: string; headers: Record<string, string> }
+  | { kind: "stdio"; command: string; args: string[] };
+
+/** Display string used in logs and the report's `server` field. */
+export function targetLabel(target: ConnectTarget): string {
+  return target.kind === "http"
+    ? target.url
+    : `stdio: ${[target.command, ...target.args].join(" ")}`;
+}
 
 export interface ServerConnection {
   client: Client;
   serverName: string;
-  transportKind: "streamable-http" | "sse";
+  transportKind: "streamable-http" | "sse" | "stdio";
   tools: Tool[];
   resources: Map<string, Resource>;
 }
 
-export async function connectToServer(serverUrl: string): Promise<ServerConnection> {
-  const url = new URL(serverUrl);
-  let client: Client;
-  let transportKind: ServerConnection["transportKind"];
+function withTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `${what} did not complete within ${CONNECT_TIMEOUT_MS / 1000} s — ` +
+              `the server accepted the connection but never finished the MCP handshake`,
+          ),
+        ),
+      CONNECT_TIMEOUT_MS,
+    );
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+async function connectTransport(target: ConnectTarget): Promise<{
+  client: Client;
+  transportKind: ServerConnection["transportKind"];
+}> {
+  if (target.kind === "stdio") {
+    const client = new Client(IMPLEMENTATION);
+    const transport = new StdioClientTransport({
+      command: target.command,
+      args: target.args,
+      stderr: "inherit", // server logs stay visible — often the only evidence
+    });
+    await withTimeout(client.connect(transport), "stdio MCP handshake");
+    return { client, transportKind: "stdio" };
+  }
+
+  const url = new URL(target.url);
+  const headers = target.headers;
+  const hasHeaders = Object.keys(headers).length > 0;
   try {
-    client = new Client(IMPLEMENTATION);
-    await client.connect(new StreamableHTTPClientTransport(url));
-    transportKind = "streamable-http";
+    const client = new Client(IMPLEMENTATION);
+    await withTimeout(
+      client.connect(
+        new StreamableHTTPClientTransport(url, hasHeaders ? { requestInit: { headers } } : {}),
+      ),
+      "Streamable HTTP connect",
+    );
+    return { client, transportKind: "streamable-http" };
   } catch (streamableError) {
     try {
-      client = new Client(IMPLEMENTATION);
-      await client.connect(new SSEClientTransport(url));
-      transportKind = "sse";
+      const client = new Client(IMPLEMENTATION);
+      const sseOpts = hasHeaders
+        ? {
+            requestInit: { headers },
+            // the SSE GET stream ignores requestInit — inject headers via fetch
+            eventSourceInit: {
+              fetch: (input: string | URL, init?: RequestInit) =>
+                fetch(input, { ...init, headers: { ...Object.fromEntries(new Headers(init?.headers)), ...headers } }),
+            },
+          }
+        : {};
+      await withTimeout(client.connect(new SSEClientTransport(url, sseOpts)), "SSE connect");
+      return { client, transportKind: "sse" };
     } catch (sseError) {
+      const pathHint =
+        url.pathname === "/" || url.pathname === ""
+          ? `\n  Hint: most MCP servers serve on a path, commonly ${url.origin}/mcp`
+          : "";
       throw new Error(
-        `Could not connect to ${serverUrl} with any transport.\n` +
-          `  Streamable HTTP: ${streamableError}\n  SSE: ${sseError}`,
+        `Could not connect to ${target.url} with any transport.\n` +
+          `  Streamable HTTP: ${streamableError}\n  SSE: ${sseError}${pathHint}`,
       );
     }
   }
+}
 
-  const serverName = client.getServerVersion()?.name ?? serverUrl;
+export async function connectToServer(target: ConnectTarget): Promise<ServerConnection> {
+  const { client, transportKind } = await connectTransport(target);
+
+  const serverName = client.getServerVersion()?.name ?? targetLabel(target);
   const toolsList = await client.listTools();
 
   // resources/list is optional server-side; UI metadata may live at listing level

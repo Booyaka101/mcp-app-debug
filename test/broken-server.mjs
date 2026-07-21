@@ -2,7 +2,8 @@
  * Broken MCP App server — reproduces the silent-failure modes mcp-app-debug
  * diagnoses. Each scenario should make specific checks FAIL.
  *
- * Usage: node test/broken-server.mjs <scenario> [port]
+ * Usage: node test/broken-server.mjs <scenario> [port] [--stdio]
+ *   --stdio    serve over stdio instead of HTTP (port ignored)
  *   ok         everything correct (hand-rolled app; all checks can pass)
  *   bad-uri    tool's _meta.ui.resourceUri points to a resource that 404s   → fails (a)
  *   bad-mime   resource served as text/html instead of the MCP App profile → fails (a)
@@ -14,6 +15,7 @@
  */
 import http from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   registerAppResource,
@@ -22,12 +24,14 @@ import {
 } from "@modelcontextprotocol/ext-apps/server";
 
 const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "tool-error", "csp-meta", "ext-img"];
-const scenario = process.argv[2] ?? "ok";
+const stdioMode = process.argv.includes("--stdio");
+const argv = process.argv.slice(2).filter((a) => a !== "--stdio");
+const scenario = argv[0] ?? "ok";
 if (!SCENARIOS.includes(scenario)) {
   console.error(`unknown scenario "${scenario}" — one of: ${SCENARIOS.join(", ")}`);
   process.exit(2);
 }
-const port = Number(process.argv[3] ?? process.env.PORT ?? 3009);
+const port = Number(argv[1] ?? process.env.PORT ?? 3009);
 
 /** Minimal hand-rolled MCP App (no SDK): handshake + optional auto tools/call. */
 function appHtml({ delayMs = 0, autoCallTool = null, head = "", body = "" } = {}) {
@@ -118,10 +122,28 @@ function buildServer() {
   return server;
 }
 
+if (stdioMode) {
+  // stdout is the MCP transport in this mode — anything human goes to stderr.
+  const server = buildServer();
+  await server.connect(new StdioServerTransport());
+  console.error(`broken-server [${scenario}] serving on stdio`);
+} else {
+  startHttp();
+}
+
+function startHttp() {
 http
   .createServer(async (req, res) => {
     if (!req.url?.startsWith("/mcp")) {
       res.writeHead(404).end();
+      return;
+    }
+    // AUTH_TOKEN=x makes the server demand "Authorization: Bearer x" —
+    // exercises the CLI's --header option.
+    const token = process.env.AUTH_TOKEN;
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "unauthorized" }));
       return;
     }
     let body = "";
@@ -150,3 +172,4 @@ http
   .listen(port, () => {
     console.log(`broken-server [${scenario}] listening on http://localhost:${port}/mcp`);
   });
+}

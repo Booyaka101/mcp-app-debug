@@ -357,7 +357,7 @@ async function main(): Promise<void> {
 
   const bridge = new AppBridge(
     null,
-    { name: "mcp-app-debug", version: "0.1.0" },
+    { name: "mcp-app-debug", version: __APP_VERSION__ },
     capabilities,
     {
       hostContext: {

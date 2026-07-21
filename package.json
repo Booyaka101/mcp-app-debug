@@ -26,6 +26,7 @@
   "scripts": {
     "build": "node esbuild.mjs",
     "typecheck": "tsc",
+    "test": "node test/run-scenarios.mjs",
     "prepack": "node esbuild.mjs"
   },
   "keywords": [
@@ -33,9 +34,12 @@
     "mcp-apps",
     "model-context-protocol",
     "debug",
+    "diagnostics",
     "app-bridge",
     "ui",
     "iframe",
+    "csp",
+    "stdio",
     "playwright"
   ],
   "license": "MIT",

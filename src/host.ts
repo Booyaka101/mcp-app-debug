@@ -4,10 +4,11 @@
  * client, collects the protocol log, and evaluates the 5 checks.
  */
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { chromium, type Browser, type Frame, type Page } from "playwright";
 import { buildReport, evaluateChecks } from "./checks.js";
@@ -17,23 +18,28 @@ import {
   fetchUiResource,
   findUiTools,
   getToolDefaults,
+  targetLabel,
+  type ConnectTarget,
   type ServerConnection,
 } from "./mcp.js";
 import type { CheckReport, CheckResult, HarnessConfig, HarnessState, LogEntry } from "./types.js";
 import { truncatePayload } from "./types.js";
 
 export interface HostOptions {
-  serverUrl: string;
+  connect: ConnectTarget;
   tool?: string;
   args?: string;
   mode: "trusted" | "strict";
   modeNote?: string;
   timeoutSec: number;
+  fullWindow: boolean;
   json: boolean;
   headless: boolean;
   interact: boolean;
   click?: string;
   screenshot?: string;
+  video?: string;
+  logFile?: string;
 }
 
 const isTTY = process.stderr.isTTY ?? false;
@@ -103,19 +109,26 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
     appToolCalls: [],
     appToolCallAttempts: 0,
   };
+  const serverLabel = targetLabel(opts.connect);
+  // Every entry (both Node- and page-originated) for --log-file export.
+  const allEntries: LogEntry[] = [];
+  const emit = (entry: LogEntry) => {
+    printEntry(entry);
+    allEntries.push(entry);
+  };
   // Server-phase entries emitted before the page exists, replayed in the panel.
   const backlog: LogEntry[] = [];
   const early = (entry: LogEntry) => {
-    printEntry(entry);
+    emit(entry);
     backlog.push(entry);
   };
   let nodeEpoch = Date.now();
 
   /* ---- 1. connect to the MCP server (Node side) */
-  process.stderr.write(`\nmcp-app-debug — connecting to ${opts.serverUrl}\n\n`);
+  process.stderr.write(`\nmcp-app-debug — connecting to ${serverLabel}\n\n`);
   let conn: ServerConnection;
   try {
-    conn = await connectToServer(opts.serverUrl);
+    conn = await connectToServer(opts.connect);
   } catch (e) {
     process.stderr.write(`${color(31, "x connection failed:")} ${e instanceof Error ? e.message : e}\n`);
     return 2;
@@ -218,7 +231,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
   });
 
   const config: HarnessConfig = {
-    serverUrl: opts.serverUrl,
+    serverUrl: serverLabel,
     serverName: conn.serverName,
     toolName: tool.name,
     toolTitle: tool.title,
@@ -268,7 +281,20 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
     host.server.close();
     return 2;
   }
-  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const viewport = { width: 1440, height: 900 };
+  let videoTmpDir: string | undefined;
+  let videoContext: Awaited<ReturnType<Browser["newContext"]>> | undefined;
+  let page: Page;
+  if (opts.video) {
+    videoTmpDir = await mkdtemp(path.join(tmpdir(), "mcp-app-debug-video-"));
+    videoContext = await browser.newContext({
+      viewport,
+      recordVideo: { dir: videoTmpDir, size: viewport },
+    });
+    page = await videoContext.newPage();
+  } else {
+    page = await browser.newPage({ viewport });
+  }
 
   let pageClosed = false;
   page.on("close", () => { pageClosed = true; });
@@ -298,7 +324,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
   };
   const note = (method: string, payload?: string, dir: LogEntry["dir"] = "event") => {
     const entry: LogEntry = { ts: Date.now() - nodeEpoch, dir, kind: "event", method, payload };
-    printEntry(entry);
+    emit(entry);
     pushToPanel(entry);
   };
 
@@ -314,7 +340,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
   // page -> node: protocol log entries (also markers for checks)
   await page.exposeBinding("__mcpLog", (source, entry: LogEntry) => {
     if (source.frame !== page.mainFrame()) return;
-    printEntry(entry);
+    emit(entry);
     if (entry.dir === "app→host" && entry.kind === "request" && entry.method === "tools/call") {
       state.appToolCallAttempts++;
     }
@@ -394,7 +420,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
         ts: Date.now() - nodeEpoch, dir: type === "error" ? "error" : "event", kind: "console",
         method: `console.${type}`, payload: truncatePayload(msg.text()),
       };
-      printEntry(entry);
+      emit(entry);
       pushToPanel(entry);
     }
   });
@@ -403,7 +429,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
       ts: Date.now() - nodeEpoch, dir: "error", kind: "jserror", method: "pageerror",
       payload: truncatePayload(err.message),
     };
-    printEntry(entry);
+    emit(entry);
     pushToPanel(entry);
   });
   page.on("requestfailed", (req) => {
@@ -412,18 +438,43 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
       ts: Date.now() - nodeEpoch, dir: "error", kind: "network", method: "request-failed",
       payload: truncatePayload(`${req.url()} — ${req.failure()?.errorText}`),
     };
-    printEntry(entry);
+    emit(entry);
     pushToPanel(entry);
   });
 
   nodeEpoch = Date.now();
   await page.goto(`${host.origin}/`);
 
-  /* ---- 6. observation window, then verdict */
-  await new Promise((resolve) => setTimeout(resolve, opts.timeoutSec * 1000));
+  /* ---- 6. observation window, then verdict.
+     Ends early when all checks have passed and stayed passed for a 2 s quiet
+     period (late CSP violations can still flip a check), when the user closes
+     the window, or at the full window — whichever comes first. */
+  const EARLY_EXIT_QUIET_MS = 2000;
+  await new Promise<void>((resolve) => {
+    let allPassSince: number | undefined;
+    const poll = setInterval(() => {
+      if (pageClosed) return finish();
+      if (opts.fullWindow) return;
+      if (evaluateChecks(state).every((c) => c.pass)) {
+        allPassSince ??= Date.now();
+        if (Date.now() - allPassSince >= EARLY_EXIT_QUIET_MS) {
+          note("all checks passed — ending observation early (--full-window to wait the full window)");
+          finish();
+        }
+      } else {
+        allPassSince = undefined;
+      }
+    }, 250);
+    const timer = setTimeout(() => finish(), opts.timeoutSec * 1000);
+    const finish = () => {
+      clearInterval(poll);
+      clearTimeout(timer);
+      resolve();
+    };
+  });
 
   const report = buildReport(state, {
-    server: opts.serverUrl,
+    server: serverLabel,
     tool: tool.name,
     mode: opts.mode + (opts.modeNote ? ` (${opts.modeNote})` : ""),
   });
@@ -449,7 +500,32 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
     ]);
   }
 
+  // Video finalizes when the context closes; saveAs needs the browser alive.
+  if (opts.video && videoContext) {
+    const video = page.video();
+    await videoContext.close().catch(() => {});
+    if (video) {
+      try {
+        await video.saveAs(opts.video);
+        process.stderr.write(`video saved: ${opts.video}\n`);
+      } catch (e) {
+        process.stderr.write(`video save failed: ${e}\n`);
+      }
+    }
+  }
   await browser.close().catch(() => {});
+  if (videoTmpDir) await rm(videoTmpDir, { recursive: true, force: true }).catch(() => {});
+
+  if (opts.logFile) {
+    try {
+      const lines = [...allEntries.map((e) => JSON.stringify(e)), JSON.stringify(report)];
+      await writeFile(opts.logFile, lines.join("\n") + "\n", "utf-8");
+      process.stderr.write(`protocol log saved: ${opts.logFile} (${allEntries.length} entries)\n`);
+    } catch (e) {
+      process.stderr.write(`log file write failed: ${e}\n`);
+    }
+  }
+
   sandbox.server.close();
   host.server.close();
   await conn.client.close().catch(() => {});

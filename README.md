@@ -10,27 +10,34 @@ clients, shows **every postMessage exchange live in a side panel**, and gives
 you **5 automated PASS/FAIL diagnostics** that tell you exactly where the flow
 broke.
 
-![all checks passing](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/first-run.png)
+![all checks passing against the official example server](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/demo.gif)
 
 A handshake failure that would be invisible in a real client looks like this —
 green up to `app-html-written`, then silence, and three red chips telling you
 what never happened:
 
-![handshake timeout diagnosed](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/handshake-timeout.png)
+![handshake timeout diagnosed](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/demo-fail.gif)
 
 ## Run it
 
 ```bash
+# HTTP server (Streamable HTTP, SSE fallback)
 npx mcp-app-debug http://localhost:3001/mcp
+
+# stdio server — everything after -- is the server command line
+npx mcp-app-debug --stdio -- npx -y @acme/my-mcp-server
+
+# server behind auth
+npx mcp-app-debug --header "Authorization: Bearer $TOKEN" https://api.example.com/mcp
 ```
 
-That's the whole setup — point it at your MCP server's Streamable HTTP
-endpoint. On the very first run it downloads Chromium automatically
-(one-time, ~150 MB, via Playwright's installer).
+That's the whole setup. On the very first run it downloads Chromium
+automatically (one-time, ~150 MB, via Playwright's installer).
 
 The browser window opens with your app on the left, the protocol log on the
 right, and the check chips on top; it stays open for interactive debugging.
-After the observation window (default 10 s) the checks print:
+Once every check has passed (or at the end of the observation window, default
+10 s) the verdict prints:
 
 ```
 Results — server http://localhost:3001/mcp, tool get-time, mode trusted
@@ -74,7 +81,15 @@ npx mcp-app-debug http://localhost:3001/mcp --json | jq .
 
 Prints one compact JSON object (`passed`, `failed`, `checks[]` with `id`,
 `title`, `pass`, `detail`, `ms`) on stdout and exits `1` if any check failed.
-`--json` implies headless.
+`--json` implies headless. Runs end early once all checks have passed and
+stayed passed for 2 s (pass `--full-window` to always wait the whole window).
+
+Exit codes: `0` all checks passed · `1` one or more checks failed ·
+`2` operational error (bad arguments, connection failed, browser failed).
+
+For CI artifacts, `--log-file debug.ndjson` writes every protocol log entry
+as NDJSON (final line is the check report) and `--video session.webm`
+records the debug window — attach either to a bug report.
 
 ## Reproducing restrictive-host failures (`--mode`)
 
@@ -97,28 +112,35 @@ everything else looks healthy.
 ## All options
 
 ```
+--stdio              target is a stdio server command (write it after --)
+--header <n:v>       extra HTTP header, repeatable ("Authorization: Bearer …")
 --tool <name>        tool to render (default: first tool with _meta.ui.resourceUri)
 --args <json>        tool arguments (default: inputSchema defaults)
 --mode <mode>        trusted | strict | 3p            (default: trusted)
 --timeout <seconds>  observation window                (default: 10)
+--full-window        wait the whole window even after all checks pass
 --json               CI mode: JSON on stdout, exit 1 on failure
 --headless           headless browser; --headed forces a window
 --click <text>       button text to click inside the app
 --no-interact        don't auto-click anything
 --screenshot <path>  save a PNG of the debug window
+--video <path>       record the session to a .webm file
+--log-file <path>    write the protocol log as NDJSON (last line = report)
 ```
 
 ## Test fixtures
 
 `test/broken-server.mjs` ships 8 scenarios (`ok`, `bad-uri`, `bad-mime`,
 `no-ready`, `slow-init`, `tool-error`, `csp-meta`, `ext-img`) reproducing the
-common silent-failure modes; `node test/run-scenarios.mjs` asserts each one
-trips exactly the right checks (all 8 pass).
+common silent-failure modes, servable over HTTP or stdio (`--stdio`), with
+optional auth (`AUTH_TOKEN=x` demands a Bearer token). `npm test` asserts each
+one trips exactly the right checks, plus strict-mode and stdio cases — 10
+cases, all green in CI on Linux and Windows.
 
 ## Architecture
 
 - Node CLI (`src/cli.ts`, commander) → `src/host.ts` Playwright harness.
-- The MCP client (Streamable HTTP with SSE fallback,
+- The MCP client (Streamable HTTP with SSE fallback, or stdio,
   `@modelcontextprotocol/sdk`) lives in **Node**, so server CORS never causes
   false negatives; the page reaches it through a Playwright binding.
 - The page (`src/web/host-page.ts`) runs the official
@@ -135,7 +157,7 @@ npm install
 npm run build        # esbuild: node CLI bundle + 2 browser bundles
 npm run typecheck    # tsc, types only
 node dist/cli.js <server-url>
-node test/run-scenarios.mjs   # 8 failure-mode scenarios, all must pass
+npm test             # 10 scenario cases, all must pass
 ```
 
 A handy live target is the official example server:

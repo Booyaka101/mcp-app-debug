@@ -89,5 +89,67 @@ for (const [scenario, expect] of Object.entries(EXPECTATIONS)) {
   }
 }
 
+/**
+ * Extra cases beyond the per-scenario loop:
+ *   strict-mode  ok server, --mode strict → app's tools/call rejected, only
+ *                check (e) fails, exit 1
+ *   stdio        ok server over stdio (--stdio -- node …) → all 5 pass, exit 0
+ */
+async function extraCase(name, cliArgs, { mustFail, mustPass, spawnServer }) {
+  const server = spawnServer?.();
+  try {
+    if (server) await waitForServer(`http://localhost:${server.port}/mcp`);
+    const { code, stdout } = await runCli(cliArgs);
+    let report;
+    try {
+      report = JSON.parse(stdout);
+    } catch {
+      failures++;
+      console.error(`FAIL ${name}: CLI produced no JSON (exit ${code}): ${stdout.slice(0, 300)}`);
+      return;
+    }
+    const failedIds = report.checks.filter((c) => !c.pass).map((c) => c.id);
+    const passedIds = report.checks.filter((c) => c.pass).map((c) => c.id);
+    const problems = [];
+    for (const id of mustFail) {
+      if (!failedIds.includes(id)) problems.push(`expected check "${id}" to FAIL, it passed`);
+    }
+    for (const id of mustPass) {
+      if (!passedIds.includes(id)) problems.push(`expected check "${id}" to PASS, it failed`);
+    }
+    const expectedExit = mustFail.length > 0 ? 1 : 0;
+    if (code !== expectedExit) problems.push(`expected exit ${expectedExit}, got ${code}`);
+    if (problems.length) {
+      failures++;
+      console.error(`FAIL ${name}:`);
+      for (const p of problems) console.error(`   - ${p}`);
+      console.error(`   report: ${JSON.stringify(report.checks.map((c) => ({ id: c.id, pass: c.pass, detail: c.detail })))}`);
+    } else {
+      console.log(`ok   ${name} (failed checks: ${failedIds.join(", ") || "none"})`);
+    }
+  } finally {
+    server?.proc.kill();
+  }
+}
+
+await extraCase(
+  "strict-mode",
+  ["http://localhost:3097/mcp", "--json", "--mode", "strict", "--timeout", "10"],
+  {
+    mustFail: ["tool-call"],
+    mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready"],
+    spawnServer: () => ({
+      port: 3097,
+      proc: spawn(process.execPath, ["test/broken-server.mjs", "ok", "3097"], { stdio: "ignore" }),
+    }),
+  },
+);
+
+await extraCase(
+  "stdio",
+  ["--json", "--timeout", "10", "--stdio", "--", process.execPath, "test/broken-server.mjs", "ok", "--stdio"],
+  { mustFail: [], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "tool-call"] },
+);
+
 console.log(failures ? `\n${failures} scenario(s) FAILED` : "\nall scenarios behaved as expected");
 process.exit(failures ? 1 : 0);
