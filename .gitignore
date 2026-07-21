@@ -1,0 +1,6 @@
+node_modules/
+dist/
+vendor/
+*.tgz
+PROGRESS.md
+ISSUE_COMMENT_DRAFT.md

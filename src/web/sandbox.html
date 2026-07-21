@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <!-- CSP is set via HTTP header by the harness (built from _meta.ui.csp).
+         The inner iframe inherits it because the app HTML is document.write-n. -->
+    <title>mcp-app-debug sandbox</title>
+    <style>
+      html, body { margin: 0; height: 100vh; width: 100vw; background: transparent; }
+      body { display: flex; flex-direction: column; }
+      * { box-sizing: border-box; }
+      iframe { background: transparent; border: 0 none; padding: 0; overflow: hidden;
+        flex-grow: 1; color-scheme: inherit; }
+    </style>
+  </head>
+  <body>
+    <script src="/sandbox.js"></script>
+  </body>
+</html>

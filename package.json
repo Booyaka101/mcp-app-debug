@@ -1,0 +1,55 @@
+{
+  "name": "mcp-app-debug",
+  "version": "0.1.0",
+  "description": "Local debug host for MCP Apps — render your server's app in a Playwright browser with full postMessage protocol visibility and 5 automated diagnostics (npx mcp-app-debug <server-url>)",
+  "type": "module",
+  "bin": {
+    "mcp-app-debug": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "author": "Booyaka101 <cbosch101@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Booyaka101/mcp-app-debug.git"
+  },
+  "homepage": "https://github.com/Booyaka101/mcp-app-debug#readme",
+  "bugs": {
+    "url": "https://github.com/Booyaka101/mcp-app-debug/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc",
+    "prepack": "node esbuild.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-apps",
+    "model-context-protocol",
+    "debug",
+    "app-bridge",
+    "ui",
+    "iframe",
+    "playwright"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.7.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "commander": "^15.0.0",
+    "playwright": "^1.61.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.28.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
