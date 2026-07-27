@@ -34,3 +34,8 @@ jobs:
       - name: TypeScript 7 readiness
         uses: Booyaka101/ts7-compat-guard@v2
 
+      # Reports without gating, like the other guards — but a BREAKING finding
+      # still shows as a failed step rather than being swallowed by '|| true'.
+      - name: MCP spec readiness (2026-07-28)
+        continue-on-error: true
+        run: npx --yes @booyaka/mcp-vet@latest .
