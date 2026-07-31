@@ -12,8 +12,10 @@
  *   tool-error every tools/call returns isError:true                       → fails (e)
  *   csp-meta   HTML carries <meta CSP> with frame-ancestors 'none'         → fails (b)
  *   ext-img    HTML loads an external image not declared in _meta.ui.csp   → fails (b)
+ *   bad-domain _meta.ui.domain is a hash of the endpoint + a trailing slash → fails (c)
  */
 import http from "node:http";
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -23,7 +25,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 
-const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "tool-error", "csp-meta", "ext-img"];
+const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "tool-error", "csp-meta", "ext-img", "bad-domain"];
 const stdioMode = process.argv.includes("--stdio");
 const argv = process.argv.slice(2).filter((a) => a !== "--stdio");
 const scenario = argv[0] ?? "ok";
@@ -32,6 +34,11 @@ if (!SCENARIOS.includes(scenario)) {
   process.exit(2);
 }
 const port = Number(argv[1] ?? process.env.PORT ?? 3009);
+
+/** Same derivation hosts use for the app sandbox origin. */
+function claudeDomain(url) {
+  return `${createHash("sha256").update(url).digest("hex").slice(0, 32)}.claudemcpcontent.com`;
+}
 
 /** Minimal hand-rolled MCP App (no SDK): handshake + optional auto tools/call. */
 function appHtml({ delayMs = 0, autoCallTool = null, head = "", body = "" } = {}) {
@@ -115,8 +122,14 @@ function buildServer() {
   }
 
   const mime = scenario === "bad-mime" ? "text/html" : RESOURCE_MIME_TYPE;
+  // The realistic way to get this wrong: hash a URL that differs from the one
+  // the connector was added with — here, the same endpoint plus a trailing slash.
+  const uiMeta =
+    scenario === "bad-domain"
+      ? { ui: { domain: claudeDomain(`http://localhost:${port}/mcp/`) } }
+      : undefined;
   registerAppResource(server, actualUri, actualUri, { mimeType: mime }, async () => ({
-    contents: [{ uri: actualUri, mimeType: mime, text: html }],
+    contents: [{ uri: actualUri, mimeType: mime, text: html, ...(uiMeta ? { _meta: uiMeta } : {}) }],
   }));
 
   return server;

@@ -7,7 +7,7 @@ error, no log, the iframe just never appears
 `mcp-app-debug` renders your server's app in a local Playwright browser using
 the **same App Bridge + double-iframe sandbox path** as spec-conformant
 clients, shows **every postMessage exchange live in a side panel**, and gives
-you **5 automated PASS/FAIL diagnostics** that tell you exactly where the flow
+you **6 automated PASS/FAIL diagnostics** that tell you exactly where the flow
 broke.
 
 ![all checks passing against the official example server](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/demo.gif)
@@ -43,13 +43,14 @@ Once every check has passed (or at the end of the observation window, default
 Results — server http://localhost:3001/mcp, tool get-time, mode trusted
   PASS  ui:// resource resolves        ui://get-time/mcp-app.html (text/html;profile=mcp-app, 530170 bytes)
   PASS  CSP permits embedding & assets no violations under the default host policy; no frame-ancestors restrictions
+  PASS  _meta.ui.domain origin         matches the origin derived from this endpoint (9cdad008…claudemcpcontent.com)
   PASS  ui/initialize handshake        handshake completed in 46 ms
   PASS  ui/ready notification          app signaled ready in 51 ms
   PASS  app-initiated tools/call       app called "get-time" → non-error result (1 app call(s) total)
-  5/5 checks passed OK
+  6/6 checks passed OK
 ```
 
-## The 5 checks
+## The 6 checks
 
 1. **ui:// resource resolves** — the tool's `_meta.ui.resourceUri` is a valid
    `ui://` URI and `resources/read` returns exactly one
@@ -59,11 +60,19 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
    `_meta.ui.csp` (same policy construction as the official basic-host); any
    `securitypolicyviolation` fired while your app renders fails this check, as
    does a `frame-ancestors` directive in your HTML that would block embedding.
-3. **ui/initialize handshake** — your app's `ui/initialize` request is answered
+3. **`_meta.ui.domain` origin** — if your resource declares a domain, it must
+   match the origin the host derives from your endpoint
+   (`sha256(<endpoint URL>)[:32] + ".claudemcpcontent.com"` on Claude). Getting
+   this *wrong* is fatal — Claude declines to mount the iframe at all — while
+   omitting it is harmless for rendering but means the sandbox origin is minted
+   fresh on every render, so an API server can't allowlist it. When the value
+   you sent is the hash of a near-miss endpoint spelling (a stray trailing
+   slash, a missing `/mcp`, the wrong scheme), the check names which one.
+4. **ui/initialize handshake** — your app's `ui/initialize` request is answered
    within 3 s of HTML injection.
-4. **ui/ready notification** — `ui/notifications/initialized` (the "ui/ready"
+5. **ui/ready notification** — `ui/notifications/initialized` (the "ui/ready"
    signal) arrives within 5 s.
-5. **app-initiated tools/call** — at least one `tools/call` *initiated by your
+6. **app-initiated tools/call** — at least one `tools/call` *initiated by your
    app* returned a non-error result. After the handshake the harness simulates
    the LLM flow (`tool-input` → server call → `tool-result`) and then clicks
    the first button in your app (or the one you name with `--click <text>`) to
@@ -130,12 +139,12 @@ everything else looks healthy.
 
 ## Test fixtures
 
-`test/broken-server.mjs` ships 8 scenarios (`ok`, `bad-uri`, `bad-mime`,
-`no-ready`, `slow-init`, `tool-error`, `csp-meta`, `ext-img`) reproducing the
-common silent-failure modes, servable over HTTP or stdio (`--stdio`), with
-optional auth (`AUTH_TOKEN=x` demands a Bearer token). `npm test` asserts each
-one trips exactly the right checks, plus strict-mode and stdio cases — 10
-cases, all green in CI on Linux and Windows.
+`test/broken-server.mjs` ships 9 scenarios (`ok`, `bad-uri`, `bad-mime`,
+`no-ready`, `slow-init`, `tool-error`, `csp-meta`, `ext-img`, `bad-domain`)
+reproducing the common silent-failure modes, servable over HTTP or stdio
+(`--stdio`), with optional auth (`AUTH_TOKEN=x` demands a Bearer token).
+`npm test` asserts each one trips exactly the right checks, plus strict-mode
+and stdio cases — 11 cases, all green in CI on Linux and Windows.
 
 ## Architecture
 

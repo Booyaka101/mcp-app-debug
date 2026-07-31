@@ -1,7 +1,8 @@
 /**
- * The 5 automated diagnostics, evaluated over the harness state collected
+ * The 6 automated diagnostics, evaluated over the harness state collected
  * during the observation window.
  */
+import { checkAppDomain } from "./domain.js";
 import type { CheckReport, CheckResult, HarnessState } from "./types.js";
 
 export const UI_INITIALIZE_DEADLINE_MS = 3000;
@@ -52,7 +53,38 @@ export function evaluateChecks(state: HarnessState): CheckResult[] {
     checks.push({ id: "csp", title: "CSP permits embedding & assets", pass, detail });
   }
 
-  // (c) ui/initialize handshake completed within 3s of HTML injection
+  // (c) _meta.ui.domain, when declared, matches the origin Claude derives
+  {
+    const verdict = checkAppDomain(state.resourceDomain, state.serverEndpoint);
+    let pass = true;
+    let detail: string;
+    switch (verdict.state) {
+      case "absent":
+        detail =
+          "no _meta.ui.domain — the app still renders, but hosts mint a fresh " +
+          "sandbox origin per render, so an API server cannot allowlist it";
+        break;
+      case "match":
+        detail = `matches the origin derived from this endpoint (${verdict.expected})`;
+        break;
+      case "no-endpoint":
+        detail = `declared "${verdict.got}"; stdio target has no endpoint URL to derive the expected value from`;
+        break;
+      case "mismatch":
+        pass = false;
+        detail =
+          `declared "${verdict.got}" but this endpoint derives "${verdict.expected}" — ` +
+          (verdict.nearMiss
+            ? `that value is the hash of the same URL ${verdict.nearMiss}; recompute it from the exact URL the connector was added with. `
+            : "") +
+          "Claude refuses to mount the iframe on any mismatch (silently, beyond a generic error). " +
+          "Other hosts use their own format — this check is Claude-specific.";
+        break;
+    }
+    checks.push({ id: "ui-domain", title: "_meta.ui.domain origin", pass, detail });
+  }
+
+  // (d) ui/initialize handshake completed within 3s of HTML injection
   {
     let pass = false;
     let detail: string;
@@ -75,7 +107,7 @@ export function evaluateChecks(state: HarnessState): CheckResult[] {
     checks.push({ id: "ui-initialize", title: "ui/initialize handshake", pass, detail, ms });
   }
 
-  // (d) ui/ready (ui/notifications/initialized) within 5s of HTML injection
+  // (e) ui/ready (ui/notifications/initialized) within 5s of HTML injection
   {
     let pass = false;
     let detail: string;
@@ -96,7 +128,7 @@ export function evaluateChecks(state: HarnessState): CheckResult[] {
     checks.push({ id: "ui-ready", title: "ui/ready notification", pass, detail, ms });
   }
 
-  // (e) at least one app-initiated tools/call returned a non-error result
+  // (f) at least one app-initiated tools/call returned a non-error result
   {
     const okCall = state.appToolCalls.find((c) => !c.isError);
     const failCalls = state.appToolCalls.filter((c) => c.isError);

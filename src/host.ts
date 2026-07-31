@@ -110,6 +110,8 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
     appToolCallAttempts: 0,
   };
   const serverLabel = targetLabel(opts.connect);
+  // only HTTP targets have a URL for hosts to derive an app origin from
+  state.serverEndpoint = opts.connect.kind === "http" ? opts.connect.url : undefined;
   // Every entry (both Node- and page-originated) for --log-file export.
   const allEntries: LogEntry[] = [];
   const emit = (entry: LogEntry) => {
@@ -182,6 +184,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
     state.resourceBytes = fetched.bytes;
     state.resourceError = fetched.error;
     state.resourceCsp = fetched.csp;
+    state.resourceDomain = fetched.domain;
     resourceCsp = fetched.csp as ResourceCsp | undefined;
     permissions = fetched.permissions;
     if (fetched.html !== undefined && fetched.ok) {

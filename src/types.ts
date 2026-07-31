@@ -52,7 +52,7 @@ export interface HarnessConfig {
 }
 
 export interface CheckResult {
-  id: "resource-uri" | "csp" | "ui-initialize" | "ui-ready" | "tool-call";
+  id: "resource-uri" | "csp" | "ui-domain" | "ui-initialize" | "ui-ready" | "tool-call";
   title: string;
   pass: boolean;
   detail: string;
@@ -79,6 +79,10 @@ export interface HarnessState {
   resourceBytes?: number;
   resourceError?: string;
   resourceCsp?: unknown;
+  /** _meta.ui.domain as declared by the server, if any */
+  resourceDomain?: unknown;
+  /** endpoint URL for HTTP targets; undefined for stdio (nothing to hash) */
+  serverEndpoint?: string;
   /** problem found by static scan of a CSP <meta> tag in the app HTML */
   metaCspIssue?: string;
   cspViolations: Array<Record<string, unknown>>;

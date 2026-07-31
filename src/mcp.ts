@@ -155,6 +155,7 @@ export interface UiResourceFetch {
   bytes?: number;
   csp?: unknown;
   permissions?: unknown;
+  domain?: unknown;
   error?: string;
 }
 
@@ -202,7 +203,7 @@ export async function fetchUiResource(
     "_meta"
   ] as Record<string, unknown> | undefined;
   const uiMeta = (contentMeta?.ui ?? listingMeta?.ui) as
-    | { csp?: unknown; permissions?: unknown }
+    | { csp?: unknown; permissions?: unknown; domain?: unknown }
     | undefined;
 
   return {
@@ -212,6 +213,7 @@ export async function fetchUiResource(
     bytes: Buffer.byteLength(html, "utf-8"),
     csp: uiMeta?.csp,
     permissions: uiMeta?.permissions,
+    domain: uiMeta?.domain,
     error: mimeOk
       ? undefined
       : `unexpected mimeType "${mimeType}" (spec requires "${RESOURCE_MIME_TYPE}")`,

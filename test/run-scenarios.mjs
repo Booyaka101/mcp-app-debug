@@ -9,7 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 // scenario → { mustFail: [...check ids], mustPass: [...check ids] }
 const EXPECTATIONS = {
-  ok: { mustFail: [], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "tool-call"] },
+  ok: { mustFail: [], mustPass: ["resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call"] },
   "bad-uri": { mustFail: ["resource-uri"], mustPass: [] },
   "bad-mime": { mustFail: ["resource-uri"], mustPass: [] },
   "no-ready": { mustFail: ["ui-initialize", "ui-ready", "tool-call"], mustPass: ["resource-uri"] },
@@ -17,6 +17,7 @@ const EXPECTATIONS = {
   "tool-error": { mustFail: ["tool-call"], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready"] },
   "csp-meta": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call"] },
   "ext-img": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call"] },
+  "bad-domain": { mustFail: ["ui-domain"], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "tool-call"] },
 };
 
 async function waitForServer(url, tries = 50) {
