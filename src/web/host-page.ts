@@ -96,6 +96,7 @@ const CHECK_TITLES: Array<[string, string]> = [
   ["ui-initialize", "ui/initialize"],
   ["ui-ready", "ui/ready"],
   ["tool-call", "app tools/call"],
+  ["protocol-revision", "protocol"],
 ];
 
 function el(tag: string, attrs: Record<string, string> = {}, text?: string): HTMLElement {

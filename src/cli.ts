@@ -3,8 +3,9 @@
  *
  * Renders an MCP server's app in a Playwright browser via the official
  * @modelcontextprotocol/ext-apps App Bridge (same double-iframe sandbox path
- * as spec-conformant clients), with a live protocol side panel and 5
- * automated PASS/FAIL diagnostics.
+ * as spec-conformant clients), with a live protocol side panel and 7
+ * automated PASS/FAIL diagnostics. Speaks both the 2025-11-25 and the
+ * stateless 2026-07-28 MCP revisions (auto-negotiated via server/discover).
  */
 import { Command, InvalidArgumentError } from "commander";
 import { runDebugHost } from "./host.js";
@@ -31,6 +32,17 @@ program
   )
   .option("--stdio", "target is a stdio server command (put it after --, e.g. --stdio -- npx -y my-server)")
   .option("--header <name:value>", "extra HTTP header, repeatable (e.g. \"Authorization: Bearer …\")", collectHeader, {})
+  .option(
+    "--protocol <revision>",
+    "MCP protocol revision: auto | 2026-07-28 | 2025-11-25 (auto probes server/discover, falls back to initialize)",
+    (value: string) => {
+      if (!["auto", "2026-07-28", "2025-11-25"].includes(value)) {
+        throw new InvalidArgumentError("must be one of: auto, 2026-07-28, 2025-11-25");
+      }
+      return value;
+    },
+    "auto",
+  )
   .option("--tool <name>", "tool to render (default: first tool declaring _meta.ui.resourceUri)")
   .option("--args <json>", "tool arguments as JSON object (default: inputSchema defaults)")
   .option(
@@ -66,9 +78,14 @@ Checks (evaluated after the observation window):
                                returns one text/html;profile=mcp-app content
   2. CSP permits embedding     no CSP violations under the host policy built from
                                _meta.ui.csp; no frame-ancestors blocking embedding
-  3. ui/initialize handshake   app's ui/initialize answered within 3 s of HTML injection
-  4. ui/ready notification     ui/notifications/initialized within 5 s
-  5. app-initiated tools/call  at least one tools/call FROM the app returned non-error
+  3. _meta.ui.domain origin    declared domain matches the origin derived from
+                               this endpoint (mismatch is fatal on Claude)
+  4. ui/initialize handshake   app's ui/initialize answered within 3 s of HTML injection
+  5. ui/ready notification     ui/notifications/initialized within 5 s
+  6. app-initiated tools/call  at least one tools/call FROM the app returned non-error
+  7. protocol revision         negotiation succeeded cleanly; a 2026-07-28 server
+                               implements server/discover (a MUST); reports whether
+                               io.modelcontextprotocol/ui is advertised
 
 Exit codes:
   0  all checks passed
@@ -76,6 +93,11 @@ Exit codes:
   2  operational error (bad arguments, could not connect, browser failed)
 
 Notes:
+  --protocol auto (default) probes server/discover first (2026-07-28, stateless)
+  and falls back to the 2025-11-25 initialize handshake — both revisions get the
+  same 7 diagnostics. Forcing a revision the server does not support exits 2 and
+  names what the server actually offers.
+
   '3p' is accepted for compatibility but deploymentMode does not exist in the MCP
   Apps SDK (verified against ext-apps 1.7.4); it maps to --mode strict, a host that
   advertises no optional capabilities — reproducing restrictive-host failures.
@@ -85,6 +107,7 @@ Examples:
   npx mcp-app-debug http://localhost:3001/mcp --tool get-time --click "Get Server Time"
   npx mcp-app-debug http://localhost:3001/mcp --json | jq .
   npx mcp-app-debug http://localhost:3001/mcp --mode 3p
+  npx mcp-app-debug http://localhost:3001/mcp --protocol 2026-07-28
   npx mcp-app-debug --header "Authorization: Bearer $TOKEN" https://api.example.com/mcp
   npx mcp-app-debug --stdio -- npx -y @acme/my-mcp-server
 `,
@@ -145,6 +168,7 @@ Examples:
 
     const exitCode = await runDebugHost({
       connect,
+      protocol: options.protocol,
       tool: options.tool,
       args: options.args,
       mode,

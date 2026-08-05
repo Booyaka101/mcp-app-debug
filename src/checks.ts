@@ -1,5 +1,5 @@
 /**
- * The 6 automated diagnostics, evaluated over the harness state collected
+ * The 7 automated diagnostics, evaluated over the harness state collected
  * during the observation window.
  */
 import { checkAppDomain } from "./domain.js";
@@ -153,6 +153,37 @@ export function evaluateChecks(state: HarnessState): CheckResult[] {
           : " (use --click <text> to press a specific control in the app)");
     }
     checks.push({ id: "tool-call", title: "app-initiated tools/call", pass, detail });
+  }
+
+  // (g) protocol revision — negotiated cleanly, and 2026-07-28 servers honor
+  // the server/discover MUST
+  {
+    const n = state.negotiated;
+    let pass = true;
+    let detail: string;
+    if (!n) {
+      pass = false;
+      detail = "no negotiation outcome recorded (connection failed earlier)";
+    } else if (n.revision === "2026-07-28" && !n.discoverImplemented) {
+      pass = false;
+      detail =
+        `server claims 2026-07-28 (stateless requests succeed) but ` +
+        `${n.notes[0] ?? "server/discover is not implemented"} — ` +
+        "the 2026-07-28 revision makes server/discover a MUST";
+    } else if (n.revision === "2026-07-28") {
+      const uiPart = n.uiExtensionAdvertised
+        ? "server advertises io.modelcontextprotocol/ui"
+        : "server does NOT advertise io.modelcontextprotocol/ui in capabilities.extensions — " +
+          "hosts that gate on the extension will not offer this app";
+      const extras = n.notes.length > 0 ? `; ${n.notes.join("; ")}` : "";
+      detail = `negotiated 2026-07-28 via server/discover; ${uiPart}${extras}`;
+    } else {
+      const discoverPart = n.notes[0] ?? "server/discover not implemented";
+      detail =
+        `negotiated 2025-11-25 via initialize (legacy path); ${discoverPart} ` +
+        "(legitimate during the 12-month deprecation window)";
+    }
+    checks.push({ id: "protocol-revision", title: "protocol revision", pass, detail });
   }
 
   return checks;

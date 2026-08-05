@@ -1,7 +1,7 @@
 /**
  * Playwright browser harness: serves the host page + sandbox on two local
  * origins, proxies MCP traffic between the page's AppBridge and the Node MCP
- * client, collects the protocol log, and evaluates the 5 checks.
+ * client, collects the protocol log, and evaluates the 7 checks.
  */
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -20,6 +20,7 @@ import {
   getToolDefaults,
   targetLabel,
   type ConnectTarget,
+  type ProtocolChoice,
   type ServerConnection,
 } from "./mcp.js";
 import type { CheckReport, CheckResult, HarnessConfig, HarnessState, LogEntry } from "./types.js";
@@ -27,6 +28,7 @@ import { truncatePayload } from "./types.js";
 
 export interface HostOptions {
   connect: ConnectTarget;
+  protocol: ProtocolChoice;
   tool?: string;
   args?: string;
   mode: "trusted" | "strict";
@@ -126,18 +128,23 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
   };
   let nodeEpoch = Date.now();
 
-  /* ---- 1. connect to the MCP server (Node side) */
+  /* ---- 1. connect to the MCP server (Node side), negotiating the revision */
   process.stderr.write(`\nmcp-app-debug — connecting to ${serverLabel}\n\n`);
   let conn: ServerConnection;
   try {
-    conn = await connectToServer(opts.connect);
+    conn = await connectToServer(opts.connect, opts.protocol, (message) =>
+      early({ ts: 0, dir: "server", kind: "event", method: "negotiate", payload: message }),
+    );
   } catch (e) {
     process.stderr.write(`${color(31, "x connection failed:")} ${e instanceof Error ? e.message : e}\n`);
     return 2;
   }
+  state.negotiated = conn.mcp.negotiated;
   early({
     ts: 0, dir: "server", kind: "event", method: "connected",
-    payload: `${conn.serverName} via ${conn.transportKind}, ${conn.tools.length} tool(s)`,
+    payload:
+      `${conn.serverName} via ${conn.transportKind}, ${conn.tools.length} tool(s), ` +
+      `protocol ${conn.mcp.negotiated.revision} (via ${conn.mcp.negotiated.via})`,
   });
 
   /* ---- 2. pick the tool */
@@ -250,7 +257,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
       permissions,
       error: state.resourceError,
     },
-    serverCapabilities: conn.client.getServerCapabilities() as Record<string, unknown> | undefined,
+    serverCapabilities: conn.mcp.getServerCapabilities(),
     backlog,
   };
 
@@ -384,7 +391,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
           : "tools/call (harness LLM sim) -> server";
         note(label, truncatePayload(p), "server");
         try {
-          const result = (await conn.client.callTool(
+          const result = (await conn.mcp.callTool(
             p as { name: string; arguments?: Record<string, unknown> },
           )) as { isError?: boolean };
           const isError = result.isError === true;
@@ -403,13 +410,13 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
         }
       }
       case "resources/list":
-        return await conn.client.listResources(p);
+        return await conn.mcp.listResources(p);
       case "resources/read":
-        return await conn.client.readResource(p as { uri: string });
+        return await conn.mcp.readResource(p as { uri: string });
       case "resources/templates/list":
-        return await conn.client.listResourceTemplates(p);
+        return await conn.mcp.listResourceTemplates(p);
       case "prompts/list":
-        return await conn.client.listPrompts(p);
+        return await conn.mcp.listPrompts(p);
       default:
         throw new Error(`unknown proxy op: ${op}`);
     }
@@ -531,7 +538,7 @@ export async function runDebugHost(opts: HostOptions): Promise<number> {
 
   sandbox.server.close();
   host.server.close();
-  await conn.client.close().catch(() => {});
+  await conn.mcp.close().catch(() => {});
 
   return report.failed > 0 ? 1 : 0;
 }

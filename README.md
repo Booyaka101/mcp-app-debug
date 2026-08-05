@@ -7,8 +7,10 @@ error, no log, the iframe just never appears
 `mcp-app-debug` renders your server's app in a local Playwright browser using
 the **same App Bridge + double-iframe sandbox path** as spec-conformant
 clients, shows **every postMessage exchange live in a side panel**, and gives
-you **6 automated PASS/FAIL diagnostics** that tell you exactly where the flow
-broke.
+you **7 automated PASS/FAIL diagnostics** that tell you exactly where the flow
+broke. It speaks **both current MCP revisions** — the stateless 2026-07-28
+protocol (`server/discover`, `_meta` envelopes) and the 2025-11-25
+`initialize` handshake — and auto-detects which one your server is on.
 
 ![all checks passing against the official example server](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/demo.gif)
 
@@ -47,10 +49,11 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
   PASS  ui/initialize handshake        handshake completed in 46 ms
   PASS  ui/ready notification          app signaled ready in 51 ms
   PASS  app-initiated tools/call       app called "get-time" → non-error result (1 app call(s) total)
-  6/6 checks passed OK
+  PASS  protocol revision              negotiated 2025-11-25 via initialize (legacy path); server/discover not implemented (legitimate during the 12-month deprecation window)
+  7/7 checks passed OK
 ```
 
-## The 6 checks
+## The 7 checks
 
 1. **ui:// resource resolves** — the tool's `_meta.ui.resourceUri` is a valid
    `ui://` URI and `resources/read` returns exactly one
@@ -77,6 +80,13 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
    the LLM flow (`tool-input` → server call → `tool-result`) and then clicks
    the first button in your app (or the one you name with `--click <text>`) to
    provoke real app activity.
+7. **protocol revision** — the protocol negotiation succeeded cleanly. Reports
+   which revision was negotiated, whether `server/discover` answered, and
+   whether the server advertises `io.modelcontextprotocol/ui` in
+   `capabilities.extensions`. FAILs when a server speaks 2026-07-28 but does
+   not implement `server/discover` (a MUST in that revision). A 2025-11-25
+   server passes with a note — legitimate during the 12-month deprecation
+   window.
 
 Beyond the checks, the log surfaces the evidence silent failures hide: app
 `console.error`s, uncaught exceptions, failed network requests, CSP violation
@@ -99,6 +109,43 @@ Exit codes: `0` all checks passed · `1` one or more checks failed ·
 For CI artifacts, `--log-file debug.ndjson` writes every protocol log entry
 as NDJSON (final line is the check report) and `--video session.webm`
 records the debug window — attach either to a bug report.
+
+## Protocol support
+
+The [2026-07-28 MCP revision](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+removed the `initialize` handshake entirely: servers are stateless, advertise
+themselves via the new `server/discover` RPC, and expect every request to
+carry its protocol version and client capabilities in `_meta` (plus
+`Mcp-Method`/`Mcp-Name` headers on Streamable HTTP POSTs). mcp-app-debug
+speaks both this and the 2025-11-25 revision:
+
+- **auto (default)** — `server/discover` is probed first (the spec sanctions
+  it as a backward-compatibility probe). A definitive answer selects the
+  stateless 2026-07-28 path; `-32601`/legacy-shaped signals fall back to the
+  `initialize` handshake. On stdio the probe is time-boxed at 5 s so a server
+  that crashes on unknown pre-initialize requests is treated as legacy —
+  the log says so when that happens.
+- **`--protocol 2026-07-28`** / **`--protocol 2025-11-25`** — force a
+  revision. If the server does not support the forced revision, the run exits
+  `2` with a message naming what the server actually offers.
+- **Half-migrated servers** — a server that rejects both `initialize` *and*
+  `server/discover` but answers stateless 2026-07-28 requests still gets
+  debugged (the harness connects via a synthetic era verdict); check 7 then
+  FAILs, because `server/discover` is a MUST:
+
+  ```
+  FAIL  protocol revision  server claims 2026-07-28 (stateless requests succeed) but server/discover returned -32601 Method not found — the 2026-07-28 revision makes server/discover a MUST
+  ```
+
+On the stateless path every request carries the documented `_meta` envelope
+(`io.modelcontextprotocol/protocolVersion`, `…/clientCapabilities` advertising
+the `io.modelcontextprotocol/ui` extension with
+`mimeTypes: ["text/html;profile=mcp-app"]`, `…/clientInfo`), results missing
+`resultType` are treated as `"complete"` per spec, and a `server/discover`
+result missing the required `ttlMs`/`cacheScope` fields is surfaced in check
+7's detail rather than crashing the run. Everything downstream of the
+connection — App Bridge, sandbox, CSP construction — is identical on both
+paths (`@modelcontextprotocol/ext-apps` is unchanged by the revision).
 
 ## Reproducing restrictive-host failures (`--mode`)
 
@@ -123,6 +170,7 @@ everything else looks healthy.
 ```
 --stdio              target is a stdio server command (write it after --)
 --header <n:v>       extra HTTP header, repeatable ("Authorization: Bearer …")
+--protocol <rev>     auto | 2026-07-28 | 2025-11-25   (default: auto)
 --tool <name>        tool to render (default: first tool with _meta.ui.resourceUri)
 --args <json>        tool arguments (default: inputSchema defaults)
 --mode <mode>        trusted | strict | 3p            (default: trusted)
@@ -143,15 +191,25 @@ everything else looks healthy.
 `no-ready`, `slow-init`, `tool-error`, `csp-meta`, `ext-img`, `bad-domain`)
 reproducing the common silent-failure modes, servable over HTTP or stdio
 (`--stdio`), with optional auth (`AUTH_TOKEN=x` demands a Bearer token).
-`npm test` asserts each one trips exactly the right checks, plus strict-mode
-and stdio cases — 11 cases, all green in CI on Linux and Windows.
+With `--stateless` it serves the 2026-07-28 revision instead — a hand-rolled
+stateless server implementing `server/discover`, rejecting `initialize` and
+stamping `resultType`/`ttlMs`/`cacheScope` — including two revision-specific
+scenarios, `discover-missing` and `no-ui-extension`. `npm test` asserts every
+scenario trips exactly the right checks on its revision (the shared scenarios
+trip identical check ids on both), plus strict-mode, stdio (both revisions)
+and forced-`--protocol` cases — 20 cases, all green in CI on Linux and
+Windows.
 
 ## Architecture
 
 - Node CLI (`src/cli.ts`, commander) → `src/host.ts` Playwright harness.
-- The MCP client (Streamable HTTP with SSE fallback, or stdio,
-  `@modelcontextprotocol/sdk`) lives in **Node**, so server CORS never causes
-  false negatives; the page reaches it through a Playwright binding.
+- The MCP client lives in **Node**, so server CORS never causes false
+  negatives; the page reaches it through a Playwright binding. Connections
+  are negotiated in `src/mcp/negotiate.ts` and served through one
+  era-agnostic interface (`McpConn`, `src/mcp/connect.ts`) with two
+  implementations: `@modelcontextprotocol/sdk` v1 for 2025-11-25
+  (Streamable HTTP with SSE fallback, or stdio) and
+  `@modelcontextprotocol/client` v2 for stateless 2026-07-28.
 - The page (`src/web/host-page.ts`) runs the official
   `@modelcontextprotocol/ext-apps` **AppBridge** in manual-handler mode with a
   logging transport wrapped around `PostMessageTransport`.
@@ -166,7 +224,7 @@ npm install
 npm run build        # esbuild: node CLI bundle + 2 browser bundles
 npm run typecheck    # tsc, types only
 node dist/cli.js <server-url>
-npm test             # 10 scenario cases, all must pass
+npm test             # 20 scenario cases (both protocol revisions), all must pass
 ```
 
 A handy live target is the official example server:

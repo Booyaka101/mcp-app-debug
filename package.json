@@ -1,7 +1,7 @@
 {
   "name": "mcp-app-debug",
-  "version": "0.3.0",
-  "description": "Local debug host for MCP Apps — render your server's app in a Playwright browser with full postMessage protocol visibility and 6 automated diagnostics (npx mcp-app-debug <server-url>)",
+  "version": "0.4.0",
+  "description": "Local debug host for MCP Apps — render your server's app in a Playwright browser with full postMessage protocol visibility and 7 automated diagnostics, on both the 2025-11-25 and stateless 2026-07-28 MCP revisions (npx mcp-app-debug <server-url>)",
   "type": "module",
   "bin": {
     "mcp-app-debug": "dist/cli.js"
@@ -44,6 +44,7 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/ext-apps": "^1.7.4",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "commander": "^15.0.0",

@@ -51,8 +51,27 @@ export interface HarnessConfig {
   backlog?: LogEntry[];
 }
 
+/** Outcome of the protocol-revision negotiation (structural mirror of
+ * NegotiatedProtocol in mcp/connect.ts, kept dependency-free for the browser
+ * bundle). */
+export interface NegotiatedInfo {
+  revision: "2026-07-28" | "2025-11-25";
+  via: "server/discover" | "initialize" | "stateless probe";
+  discoverImplemented: boolean;
+  uiExtensionAdvertised?: boolean;
+  serverInfo?: { name: string; version?: string };
+  notes: string[];
+}
+
 export interface CheckResult {
-  id: "resource-uri" | "csp" | "ui-domain" | "ui-initialize" | "ui-ready" | "tool-call";
+  id:
+    | "resource-uri"
+    | "csp"
+    | "ui-domain"
+    | "ui-initialize"
+    | "ui-ready"
+    | "tool-call"
+    | "protocol-revision";
   title: string;
   pass: boolean;
   detail: string;
@@ -72,6 +91,8 @@ export interface CheckReport {
 /** Everything host.ts accumulates for checks.ts to evaluate. */
 export interface HarnessState {
   mode: "trusted" | "strict";
+  /** protocol-revision negotiation outcome (set right after connect) */
+  negotiated?: NegotiatedInfo;
   resourceUri?: string;
   resourceUriValid: boolean;
   resourceOk: boolean;
