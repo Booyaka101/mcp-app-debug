@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.1 — 2026-08-09
+
+Security-only patch. No behaviour change, no API change — the CLI, its flags
+and its output are byte-identical to 0.4.0.
+
+Clears six advisories that reached us through
+`@modelcontextprotocol/sdk@1.30.0`'s transitive tree. All are in-range patch
+bumps of transitive packages; no direct dependency was moved:
+
+| Package | Bump | Advisory |
+| --- | --- | --- |
+| `fast-uri` | 3.1.4 → 3.1.5 | [GHSA-7p8r-x3mc-p8w7](https://github.com/advisories/GHSA-7p8r-x3mc-p8w7) (high) — host confusion via a backslash authority introducer |
+| `ip-address` | 10.2.0 → 10.4.0 | [GHSA-mwp4-54f8-5fhr](https://github.com/advisories/GHSA-mwp4-54f8-5fhr) (high) — leading-zero octets decoded as decimal, plus two SSRF / trust-boundary bypasses |
+| `hono` | 4.12.31 → 4.13.0 | [GHSA-8j4g-w8fx-2239](https://github.com/advisories/GHSA-8j4g-w8fx-2239) — ReDoS in the CORS middleware |
+| `@hono/node-server` | 1.19.14 → 2.1.0 | [GHSA-frvp-7c67-39w9](https://github.com/advisories/GHSA-frvp-7c67-39w9) — path traversal in `serve-static` on Windows via an encoded `%5C` |
+
+The `@hono/node-server` major is **sanctioned upstream, not forced**: the SDK
+declares `^1.19.9 || ^2.0.5`, so 2.x is a range it already supports, and 2.0.5
+is where the traversal fix landed.
+
+`npm audit` now reports **0 vulnerabilities**, and all 18 scenarios pass on
+Ubuntu and Windows.
+
+### Note on the delay
+
+This fix sat merged-ready for three days because its CI run was caught in the
+2026-08-06 GitHub Actions incident — the run sat *queued* and never started
+(`Failed to resolve action download info: Service Unavailable`), so the PR
+looked half-checked rather than blocked. Re-running it was all that was needed.
+
 ## 0.4.0 — 2026-08-05
 
 **Dual-protocol: debug MCP Apps on both the 2025-11-25 and the 2026-07-28
