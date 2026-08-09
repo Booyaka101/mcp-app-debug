@@ -1,0 +1,44 @@
+name: Release
+
+# Publishes mcp-app-debug to npm with provenance when a v* tag is pushed.
+# Requires an NPM_TOKEN secret (Automation token) on the repository.
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for npm provenance
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      # Publishes only when an NPM_TOKEN is configured AND this version is new.
+      # Without a token (the maintainer publishes manually with 2FA), the build +
+      # tests above still run as release validation and this step skips cleanly —
+      # so a tag push never red-X's just because CI can't do the interactive 2FA.
+      - name: Publish to npm (with provenance) if new
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "No NPM_TOKEN configured — build + tests passed; publish manually (npm publish, 2FA). Skipping."
+            exit 0
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "mcp-app-debug@$VERSION" version >/dev/null 2>&1; then
+            echo "mcp-app-debug@$VERSION already published — skipping."
+          else
+            npm publish --provenance --access public
+          fi
