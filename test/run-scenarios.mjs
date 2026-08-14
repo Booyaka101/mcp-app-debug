@@ -230,5 +230,175 @@ await extraCase(
   }
 }
 
+/**
+ * Host-conformance scenarios (`mcp-app-debug host`):
+ *   host-conformant   fake-host (advertises ui ext, relays everything) → 7/7
+ *                     PASS, exit 0
+ *   host-drop         fake-host --drop (no capabilities.extensions, tool-result
+ *                     _meta stripped) → client-advertises-ui and
+ *                     tool-result-meta-preserved FAIL, exit 1
+ *   host-no-client    nothing connects → exit 2, "no client connected", no JSON
+ *   host-list-only    fake-host --list-only (never calls probe) → chip 1 PASS,
+ *                     chips 2-7 INCONCLUSIVE, exit 0
+ *   host-scan-dogfood scan mode IS a conformant 2026-07-28 host — both
+ *                     directions must go 7/7 at once
+ */
+function spawnCollect(nodeArgs) {
+  const proc = spawn(process.execPath, nodeArgs, { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  proc.stdout.on("data", (d) => (stdout += d));
+  proc.stderr.on("data", (d) => (stderr += d));
+  const done = new Promise((resolve) => {
+    proc.on("exit", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+  });
+  return { proc, done };
+}
+
+function assertHostReport(name, code, stdout, expect) {
+  let report;
+  try {
+    report = JSON.parse(stdout);
+  } catch {
+    failures++;
+    console.error(`FAIL ${name}: host CLI produced no JSON (exit ${code}): ${stdout.slice(0, 300)}`);
+    return;
+  }
+  const problems = [];
+  for (const [id, verdict] of Object.entries(expect.verdicts)) {
+    const check = report.checks.find((c) => c.id === id);
+    if (!check) problems.push(`no check "${id}" in report`);
+    else if (check.verdict !== verdict) {
+      problems.push(`expected "${id}" to be ${verdict.toUpperCase()}, got ${check.verdict.toUpperCase()}: ${check.detail}`);
+    }
+  }
+  for (const [id, substring] of Object.entries(expect.detailContains ?? {})) {
+    const check = report.checks.find((c) => c.id === id);
+    if (check && !check.detail.includes(substring)) {
+      problems.push(`expected "${id}" detail to contain ${JSON.stringify(substring)}, got: ${check.detail}`);
+    }
+  }
+  const counts = expect.counts;
+  if (counts && (report.passed !== counts[0] || report.failed !== counts[1] || report.inconclusive !== counts[2])) {
+    problems.push(`expected passed/failed/inconclusive ${counts.join("/")}, got ${report.passed}/${report.failed}/${report.inconclusive}`);
+  }
+  if (report.mode !== "host") problems.push(`expected mode "host", got ${report.mode}`);
+  if (code !== expect.exit) problems.push(`expected exit ${expect.exit}, got ${code}`);
+  if (problems.length) {
+    failures++;
+    console.error(`FAIL ${name}:`);
+    for (const p of problems) console.error(`   - ${p}`);
+    console.error(`   report: ${JSON.stringify(report.checks.map((c) => ({ id: c.id, verdict: c.verdict, detail: c.detail })))}`);
+  } else {
+    const fails = report.checks.filter((c) => c.verdict === "fail").map((c) => c.id);
+    console.log(`ok   ${name} (failed checks: ${fails.join(", ") || "none"})`);
+  }
+}
+
+async function hostCase(name, { port, windowSec, clientArgs, expect }) {
+  const host = spawnCollect([
+    "dist/cli.js", "host", "--port", String(port), "--json", "--window", String(windowSec),
+  ]);
+  try {
+    await waitForServer(`http://localhost:${port}/mcp`);
+    let clientRes;
+    if (clientArgs) {
+      clientRes = await new Promise((resolve) => {
+        execFile(process.execPath, clientArgs, { timeout: 120_000 }, (err, stdout, stderr) =>
+          resolve({ code: err?.code ?? 0, stdout, stderr }),
+        );
+      });
+    }
+    const { code, stdout, stderr } = await host.done;
+    if (expect.noClient) {
+      const problems = [];
+      if (code !== 2) problems.push(`expected exit 2, got ${code}`);
+      if (stdout.trim() !== "") problems.push(`expected no JSON on stdout, got: ${stdout.slice(0, 200)}`);
+      if (!/no client connected/.test(stderr)) problems.push(`expected stderr to say "no client connected"; got: ${stderr.slice(-300)}`);
+      if (problems.length) {
+        failures++;
+        console.error(`FAIL ${name}:`);
+        for (const p of problems) console.error(`   - ${p}`);
+      } else {
+        console.log(`ok   ${name} (exit 2, no client connected)`);
+      }
+      return { clientRes };
+    }
+    assertHostReport(name, code, stdout, expect);
+    return { clientRes };
+  } finally {
+    host.proc.kill();
+  }
+}
+
+const ALL_PASS = Object.fromEntries(
+  [
+    "client-advertises-ui", "ui-resource-read", "app-mounted", "ui-initialize-answered",
+    "tool-result-meta-preserved", "app-call-relayed", "sandbox-origin-and-csp",
+  ].map((id) => [id, "pass"]),
+);
+
+await hostCase("host-conformant", {
+  port: 3311,
+  windowSec: 60,
+  clientArgs: ["test/fake-host.mjs", "http://localhost:3311/mcp"],
+  expect: { exit: 0, verdicts: ALL_PASS, counts: [7, 0, 0] },
+});
+
+await hostCase("host-drop", {
+  port: 3312,
+  windowSec: 60,
+  clientArgs: ["test/fake-host.mjs", "http://localhost:3312/mcp", "--drop"],
+  expect: {
+    exit: 1,
+    verdicts: {
+      ...ALL_PASS,
+      "client-advertises-ui": "fail",
+      "tool-result-meta-preserved": "fail",
+    },
+    counts: [5, 2, 0],
+    detailContains: {
+      "client-advertises-ui": "pydantic-ai#6613 shape",
+      "tool-result-meta-preserved": "the host dropped tool-result _meta",
+    },
+  },
+});
+
+await hostCase("host-no-client", {
+  port: 3313,
+  windowSec: 5,
+  clientArgs: null,
+  expect: { noClient: true },
+});
+
+await hostCase("host-list-only", {
+  port: 3314,
+  windowSec: 8,
+  clientArgs: ["test/fake-host.mjs", "http://localhost:3314/mcp", "--list-only"],
+  expect: {
+    exit: 0,
+    verdicts: Object.fromEntries(
+      Object.keys(ALL_PASS).map((id) => [id, id === "client-advertises-ui" ? "pass" : "inconclusive"]),
+    ),
+    counts: [1, 0, 6],
+    detailContains: { "ui-resource-read": "ask it to run `probe`" },
+  },
+});
+
+{
+  const { clientRes } = await hostCase("host-scan-dogfood", {
+    port: 3315,
+    windowSec: 60,
+    clientArgs: ["dist/cli.js", "http://localhost:3315/mcp", "--json"],
+    expect: { exit: 0, verdicts: ALL_PASS, counts: [7, 0, 0] },
+  });
+  // The scan side of the dogfood run must be 7/7 too.
+  assertReport("host-scan-dogfood [scan side]", clientRes?.code ?? -1, clientRes?.stdout ?? "", {
+    mustFail: [],
+    mustPass: ["resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"],
+    detailContains: { "protocol-revision": "negotiated 2026-07-28 via server/discover" },
+  });
+}
+
 console.log(failures ? `\n${failures} scenario(s) FAILED` : "\nall scenarios behaved as expected");
 process.exit(failures ? 1 : 0);

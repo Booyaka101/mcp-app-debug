@@ -8,6 +8,7 @@
  * stateless 2026-07-28 MCP revisions (auto-negotiated via server/discover).
  */
 import { Command, InvalidArgumentError } from "commander";
+import { runHostConformance } from "./fixture-server.js";
 import { runDebugHost } from "./host.js";
 
 const program = new Command();
@@ -102,6 +103,8 @@ Notes:
   Apps SDK (verified against ext-apps 1.7.4); it maps to --mode strict, a host that
   advertises no optional capabilities — reproducing restrictive-host failures.
 
+Grading a HOST instead of a server: mcp-app-debug host  (see: mcp-app-debug host --help)
+
 Examples:
   npx mcp-app-debug http://localhost:3001/mcp
   npx mcp-app-debug http://localhost:3001/mcp --tool get-time --click "Get Server Time"
@@ -189,7 +192,88 @@ Examples:
     process.stdout.write("", () => process.exit(exitCode));
   });
 
-program.parseAsync().catch((e) => {
+/**
+ * `mcp-app-debug host` — host-conformance mode. A separate Command instance,
+ * dispatched by hand below: registering it as a subcommand would let the
+ * program-level --json/--stdio options swallow the host flags (commander
+ * recognises program options after a subcommand name by default), and the
+ * default `mcp-app-debug <url>` command must stay byte-identical.
+ */
+const hostProgram = new Command();
+
+hostProgram
+  .name("mcp-app-debug host")
+  .description(
+    "Host-conformance mode: serve a conformant MCP Apps fixture server and grade the host that connects (7 PASS/FAIL/INCONCLUSIVE checks)",
+  )
+  .version(__APP_VERSION__)
+  .option(
+    "--port <n>",
+    "HTTP port for the fixture server (Streamable HTTP at /mcp)",
+    (v: string) => {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 65535) {
+        throw new InvalidArgumentError("must be a port number (1-65535)");
+      }
+      return n;
+    },
+    3111,
+  )
+  .option("--stdio", "serve the fixture over stdio instead, for hosts that spawn a command (the verdict then prints on stderr — stdout is the transport)")
+  .option(
+    "--window <seconds>",
+    "observation window — how long to wait for the host",
+    (v: string) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 3) throw new InvalidArgumentError("must be a number >= 3");
+      return n;
+    },
+    120,
+  )
+  .option("--json", "CI mode: one final JSON report on stdout, no live chip output; ends early once every check resolves")
+  .addHelpText(
+    "after",
+    `
+The 7 host checks (each PASS / FAIL / INCONCLUSIVE — never a guess):
+  1. client-advertises-ui        the client advertised io.modelcontextprotocol/ui
+                                 (initialize capabilities.extensions, or the
+                                 2026-07-28 clientCapabilities _meta envelope)
+  2. ui-resource-read            resources/read arrived for the declared ui:// URI
+  3. app-mounted                 the probe app's beacon arrived at all
+  4. ui-initialize-answered      the host answered the app's ui/initialize
+  5. tool-result-meta-preserved  the planted _meta.ui.probeToken reached the app
+                                 inside the tool-result payload
+  6. app-call-relayed            the app's own tools/call reached the server
+  7. sandbox-origin-and-csp      distinct sandbox origin, no CSP violations
+
+Exit codes:
+  0  no check failed (inconclusive checks do not fail the run)
+  1  one or more checks failed
+  2  operational error (no client connected within --window, port in use, …)
+
+Examples:
+  mcp-app-debug host                      # wait on http://localhost:3111/mcp
+  mcp-app-debug host --port 4000 --json   # CI verdict as JSON
+  mcp-app-debug host --stdio              # for hosts that spawn a command
+`,
+  )
+  .action(async (options) => {
+    const exitCode = await runHostConformance({
+      port: options.port,
+      stdio: Boolean(options.stdio),
+      windowSec: options.window,
+      json: Boolean(options.json),
+    });
+    process.exitCode = exitCode;
+    // Same Windows stdout-flush dance as scan mode.
+    process.stdout.write("", () => process.exit(exitCode));
+  });
+
+const parsing =
+  process.argv[2] === "host"
+    ? hostProgram.parseAsync(process.argv.slice(3), { from: "user" })
+    : program.parseAsync();
+parsing.catch((e) => {
   process.stderr.write(`fatal: ${e instanceof Error ? e.stack ?? e.message : e}\n`);
   process.exit(2);
 });

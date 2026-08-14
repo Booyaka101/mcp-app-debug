@@ -1,5 +1,68 @@
 # Changelog
 
+## 0.5.0 — 2026-08-14
+
+**Host-conformance mode: `mcp-app-debug host` grades the other end of the
+wire.**
+
+Until now this tool graded servers. The mirror-image failure is a host or
+agent framework that silently drops MCP Apps fields, so the app never renders
+and nobody gets an error.
+[pydantic-ai#6613](https://github.com/pydantic/pydantic-ai/issues/6613)
+(opened 2026-07-20, still open at release time) enumerates it precisely:
+tool-result `_meta` is discarded by `_map_mcp_tool_result`; `read_resource()`
+loses the `text/html;profile=mcp-app` mimeType and the resource `_meta`
+carrying sandbox security policies; and the hand-copied server-capability
+field list drops `extensions` entirely, so `io.modelcontextprotocol/ui`
+support can never be advertised. That reporter had to derive all of this by
+hand; `mcp-app-debug host` prints the same verdict in one run.
+
+The official ext-apps `debug-server` example covers adjacent ground but is a
+manual dashboard (event log, callback-status table, action buttons) with no
+PASS/FAIL verdict and no CI mode. MCPJam Inspector ships an MCP Apps
+Conformance SDK, but — like this tool's scan mode until today — it grades
+servers; its own docs say "This currently validates the server-side MCP Apps
+surface only. It does not prove full host-side SEP-1865 behavior such as
+`ui/initialize`, sandbox-proxy forwarding, or host notification ordering."
+`host` mode is what covers that other end, from the outside: it observes what
+the host does on the wire plus what the app can self-report from inside the
+sandbox.
+
+### Added
+
+- **`mcp-app-debug host [--port 3111] [--stdio] [--window 120] [--json]`** —
+  mcp-app-debug becomes a conformant MCP Apps *server* (both the 2025-11-25
+  `initialize` handshake and the stateless 2026-07-28 `server/discover` path,
+  advertising `io.modelcontextprotocol/ui` in `capabilities.extensions` on
+  both) and grades whoever connects. One model-visible tool `probe` whose
+  result carries `structuredContent` plus a planted `_meta.ui.probeToken`
+  (random per run), one `ui://` resource with `_meta.ui` (csp + domain), one
+  app-only `report` tool the probe app calls with what it saw — plus a direct
+  HTTP beacon side channel, so a broken app→server relay is itself observable
+  instead of blinding every other check.
+- **7 host checks**, each PASS / FAIL / INCONCLUSIVE and never a guess:
+  `client-advertises-ui` (FAIL is the pydantic-ai#6613 capabilities defect
+  verbatim), `ui-resource-read`, `app-mounted`, `ui-initialize-answered`,
+  `tool-result-meta-preserved` (FAIL is the `_map_mcp_tool_result` defect),
+  `app-call-relayed` (a precondition of the two before it — when it fails
+  without side-channel data they report INCONCLUSIVE, not FAIL), and
+  `sandbox-origin-and-csp`.
+- Exit codes: `0` no check failed (a host that never calls `probe` gets
+  INCONCLUSIVEs, not fake FAILs), `1` one or more checks failed, `2`
+  operational (no client connected within `--window`, port in use).
+- Test fixtures: `test/fake-host.mjs`, a minimal conformant host (Playwright +
+  the same double-iframe sandbox files the package ships) with `--drop`
+  (omits `capabilities.extensions`, strips tool-result `_meta`) and
+  `--list-only` modes. Five new suite scenarios, including a dogfood case
+  where scan mode grades the fixture while the fixture grades scan mode —
+  both directions must go 7/7 in one run.
+
+### Unchanged by design
+
+- `mcp-app-debug <server-url>` (scan mode) is byte-identical to 0.4.1 —
+  verified by diffing `--json` output against a 0.4.1 baseline (only timing
+  numbers differ). All 20 existing scenarios still pass.
+
 ## 0.4.1 — 2026-08-09
 
 Security-only patch. No behaviour change, no API change — the CLI, its flags

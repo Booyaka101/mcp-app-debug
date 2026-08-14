@@ -119,6 +119,88 @@ export interface HarnessState {
   interactNote?: string;
 }
 
+/* ------------------------------------------------------- host-conformance */
+
+/** What the probe app self-reports from inside the sandbox (`mcp-app-debug
+ * host`). Arrives via the app-only `report` tool and/or a direct HTTP beacon
+ * to the fixture server — two channels, so a broken app→server relay does not
+ * also blind the mount detection. */
+export interface ProbeBeacon {
+  /** which channel delivered it */
+  via: "report-call" | "direct";
+  /** "mounted" fires right after the app script runs; "final" after the
+   * tool-result wait window */
+  phase?: "mounted" | "final";
+  /** ms since fixture start, stamped server-side on arrival */
+  at: number;
+  origin?: string;
+  referrer?: string;
+  /** true means the app can reach window.top — no sandbox isolation */
+  topAccessible?: boolean;
+  uiInitializeAnswered?: boolean;
+  uiInitializeLatencyMs?: number;
+  hostInfo?: unknown;
+  sawToolInput?: boolean;
+  sawToolResult?: boolean;
+  toolResultHadStructuredContent?: boolean;
+  /** _meta.ui.probeToken as seen in the tool-result the app received */
+  probeToken?: string | null;
+  toolResultMetaKeys?: string[];
+  cspViolations?: Array<{ violatedDirective?: string; blockedURI?: string }>;
+}
+
+/** Everything the fixture server records about the connecting host. All
+ * timestamps are ms since fixture start. */
+export interface HostObservations {
+  probeToken: string;
+  firstContactAt?: number;
+  clientInfo?: { name?: string; version?: string };
+  /** params.capabilities from a 2025-11-25 initialize request */
+  initCapabilities?: Record<string, unknown>;
+  /** io.modelcontextprotocol/clientCapabilities from any request's _meta
+   * envelope (the 2026-07-28 path) */
+  envelopeCapabilities?: Record<string, unknown>;
+  discoverAt?: number;
+  toolsListedAt?: number;
+  probeCalledAt?: number;
+  resourceReadAt?: number;
+  /** resources/read requests for URIs other than the declared one */
+  otherReads: string[];
+  beacons: ProbeBeacon[];
+  reportCalls: number;
+  reportCallAt?: number;
+}
+
+export interface HostCheckResult {
+  id:
+    | "client-advertises-ui"
+    | "ui-resource-read"
+    | "app-mounted"
+    | "ui-initialize-answered"
+    | "tool-result-meta-preserved"
+    | "app-call-relayed"
+    | "sandbox-origin-and-csp";
+  title: string;
+  /** the authoritative outcome — INCONCLUSIVE is never counted as failed */
+  verdict: "pass" | "fail" | "inconclusive";
+  /** verdict === "pass" — kept so scan-mode `--json` consumers work unchanged */
+  pass: boolean;
+  detail: string;
+  /** measured latency in ms where applicable */
+  ms?: number;
+  /** internal: verdict can no longer change (stripped from the report) */
+  resolved?: boolean;
+}
+
+export interface HostReport {
+  mode: "host";
+  fixture: string;
+  passed: number;
+  failed: number;
+  inconclusive: number;
+  checks: HostCheckResult[];
+}
+
 export const TRUNCATE_LEN = 200;
 
 export function truncatePayload(value: unknown): string {
