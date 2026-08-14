@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: MCP Apps overview
+    url: https://modelcontextprotocol.io/extensions/apps/overview
+    about: The extension spec itself, covering `_meta`, resource templates and the render contract.
+  - name: ext-apps issue tracker
+    url: https://github.com/modelcontextprotocol/ext-apps/issues
+    about: Spec ambiguities and host bugs. If Claude Desktop renders nothing but this host renders fine, report it there.
+  - name: Security issue
+    url: https://github.com/Booyaka101/mcp-app-debug/security/advisories/new
+    about: Please report vulnerabilities privately, not as a public issue.
