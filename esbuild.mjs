@@ -4,7 +4,8 @@ import { cp, readFile } from "node:fs/promises";
 const pkg = JSON.parse(await readFile(new URL("./package.json", import.meta.url), "utf-8"));
 const define = { __APP_VERSION__: JSON.stringify(pkg.version) };
 
-// Node CLI — deps stay external (installed via npm), ESM output.
+// Node CLI — deps stay external (installed via npm), ESM output. The host-mode
+// probe app (src/app/probe.html) is inlined as a string via the text loader.
 await build({
   entryPoints: ["src/cli.ts"],
   outfile: "dist/cli.js",
@@ -13,6 +14,7 @@ await build({
   format: "esm",
   target: "node20",
   packages: "external",
+  loader: { ".html": "text" },
   banner: { js: "#!/usr/bin/env node" },
   sourcemap: false,
   logLevel: "info",

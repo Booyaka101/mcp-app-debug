@@ -12,6 +12,10 @@ broke. It speaks **both current MCP revisions** — the stateless 2026-07-28
 protocol (`server/discover`, `_meta` envelopes) and the 2025-11-25
 `initialize` handshake — and auto-detects which one your server is on.
 
+It debugs **both ends of the wire**: `mcp-app-debug <server-url>` grades your
+*server*, and `mcp-app-debug host` grades the *host* that connects to it —
+see [Grade a host](#grade-a-host-host-conformance-mode).
+
 ![all checks passing against the official example server](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/demo.gif)
 
 A handshake failure that would be invisible in a real client looks like this —
@@ -91,6 +95,103 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
 Beyond the checks, the log surfaces the evidence silent failures hide: app
 `console.error`s, uncaught exceptions, failed network requests, CSP violation
 details, and every JSON-RPC frame with direction and timing.
+
+## Grade a host (`host` conformance mode)
+
+The mirror image of a broken server is a **host or agent framework that
+silently drops MCP Apps fields** — the app never renders and nobody gets an
+error. [pydantic-ai#6613](https://github.com/pydantic/pydantic-ai/issues/6613)
+is the canonical case: tool-result `_meta` discarded, `read_resource()` losing
+the `text/html;profile=mcp-app` mimeType and the resource `_meta` that carries
+sandbox security policies, and the `extensions` capability field dropped so
+`io.modelcontextprotocol/ui` support can never be advertised. The reporter had
+to derive all of that by hand; this mode prints the verdict in one run.
+
+```bash
+npx mcp-app-debug host              # fixture serves http://localhost:3111/mcp
+npx mcp-app-debug host --json       # CI verdict as one JSON object
+npx mcp-app-debug host --stdio      # for hosts that spawn a server command
+```
+
+mcp-app-debug becomes a **conformant MCP Apps server** (both protocol
+revisions, `io.modelcontextprotocol/ui` advertised on both) and grades
+whoever connects. Point the host you want to test at the printed URL and ask
+it to run the `probe` tool. The probe app that renders inside the host
+self-reports what it received; the fixture combines that with what it saw on
+the wire into 7 checks, each **PASS / FAIL / INCONCLUSIVE — never a guess**:
+
+1. **client-advertises-ui** — the client's capabilities contain
+   `io.modelcontextprotocol/ui` (2025-11-25: `initialize`
+   `params.capabilities.extensions`; 2026-07-28: the
+   `io.modelcontextprotocol/clientCapabilities` `_meta` envelope). FAIL is
+   the pydantic-ai#6613 capabilities defect verbatim.
+2. **ui-resource-read** — a `resources/read` for the declared `ui://` URI
+   arrived.
+3. **app-mounted** — the probe app's beacon arrived at all. If check 2 passed
+   and this fails, the host most likely dropped the
+   `text/html;profile=mcp-app` mimeType or refused to mount the iframe.
+4. **ui-initialize-answered** — the host answered the app's `ui/initialize`
+   (self-reported, with latency).
+5. **tool-result-meta-preserved** — the planted `_meta.ui.probeToken` (a
+   random hex string minted per run) reached the app inside the `tool-result`
+   payload. FAIL is the `_map_mcp_tool_result` defect.
+6. **app-call-relayed** — the `report` call itself proves the host relays
+   app→server `tools/call`. It is a precondition of checks 4 and 5, so when
+   it fails and the direct beacon brought no data either, those two report
+   INCONCLUSIVE, never FAIL.
+7. **sandbox-origin-and-csp** — the app runs on a distinct sandbox origin
+   (`window.top` unreachable) and no `securitypolicyviolation` fired.
+
+A host that drops `capabilities.extensions` and strips tool-result `_meta`
+(reproduce it with `node test/fake-host.mjs <url> --drop`) gets:
+
+```
+{"mode":"host","fixture":"http://localhost:3111/mcp","passed":5,"failed":2,"inconclusive":0,"checks":[
+ {"id":"client-advertises-ui","verdict":"fail","pass":false,"detail":"client capabilities carried no extensions map; io.modelcontextprotocol/ui was never advertised (pydantic-ai#6613 shape)"},
+ {"id":"ui-resource-read","verdict":"pass","pass":true,"detail":"resources/read ui://mcp-app-debug/probe.html at +16 ms"},
+ {"id":"app-mounted","verdict":"pass","pass":true,"detail":"beacon received at +168 ms (via direct beacon)"},
+ {"id":"ui-initialize-answered","verdict":"pass","pass":true,"detail":"answered in 1 ms"},
+ {"id":"tool-result-meta-preserved","verdict":"fail","pass":false,"detail":"planted _meta.ui.probeToken ff90… did not reach the app; the host dropped tool-result _meta"},
+ {"id":"app-call-relayed","verdict":"pass","pass":true,"detail":"1 app-initiated tools/call"},
+ {"id":"sandbox-origin-and-csp","verdict":"pass","pass":true,"detail":"origin http://127.0.0.1:64822; no violations"}]}
+```
+
+and exit code 1 (`title` fields elided here for width). A fully conformant
+host goes 7/7 with exit 0 — scan mode itself is one: `mcp-app-debug host` in
+one terminal and `mcp-app-debug http://localhost:3111/mcp` in another go 7/7
+in *both* directions, and the test suite asserts exactly that.
+
+Behaviour at the edges: if **no client connects** within `--window` (default
+120 s in host mode) the run exits 2 with "no client connected" — never a fake
+FAIL. A host that connects and lists tools but **never calls `probe`** gets
+checks 2-7 INCONCLUSIVE ("the host never called the tool — ask it to run
+`probe`") and exit 0. Text mode prints checks as they resolve and keeps
+serving until the window ends or Ctrl-C; `--json` prints a single final
+object, no interactive output, and ends early once every check resolves. In
+`--stdio` mode the verdict prints on stderr (stdout is the transport).
+
+**What this can and cannot see.** Host mode observes only what the host does
+on the wire plus what the probe app can self-report from inside the sandbox.
+It cannot inspect the host's code, and a failing check means *a field did not
+arrive*, not that a specific function is at fault. It does not claim to
+verify SEP-1865 host compliance — it claims exactly the seven observations
+above. A host that reads the resource over a transport the fixture cannot see
+(native or in-process, without touching the fixture's endpoint) is out of
+scope. For context: the official ext-apps `debug-server` example is a manual
+dashboard with no verdict, and MCPJam Inspector's Apps Conformance SDK —
+per its own docs — "currently validates the server-side MCP Apps surface
+only. It does not prove full host-side SEP-1865 behavior such as
+`ui/initialize`, sandbox-proxy forwarding, or host notification ordering."
+Host mode exists to cover that other end.
+
+Host-mode options:
+
+```
+--port <n>           fixture port, Streamable HTTP at /mcp   (default: 3111)
+--stdio              serve the fixture over stdio (verdict on stderr)
+--window <seconds>   how long to wait for the host           (default: 120)
+--json               CI mode: one JSON report on stdout, ends early
+```
 
 ## CI usage
 
@@ -194,11 +295,15 @@ reproducing the common silent-failure modes, servable over HTTP or stdio
 With `--stateless` it serves the 2026-07-28 revision instead — a hand-rolled
 stateless server implementing `server/discover`, rejecting `initialize` and
 stamping `resultType`/`ttlMs`/`cacheScope` — including two revision-specific
-scenarios, `discover-missing` and `no-ui-extension`. `npm test` asserts every
-scenario trips exactly the right checks on its revision (the shared scenarios
-trip identical check ids on both), plus strict-mode, stdio (both revisions)
-and forced-`--protocol` cases — 20 cases, all green in CI on Linux and
-Windows.
+scenarios, `discover-missing` and `no-ui-extension`. For host mode,
+`test/fake-host.mjs` is a minimal conformant host (Playwright + the same
+double-iframe sandbox files the package ships) with `--drop` (the
+pydantic-ai#6613 shape: no `capabilities.extensions`, tool-result `_meta`
+stripped) and `--list-only` modes. `npm test` asserts every scenario trips
+exactly the right checks on its revision (the shared scenarios trip identical
+check ids on both), plus strict-mode, stdio (both revisions),
+forced-`--protocol` and five host-mode cases — 26 assertions, all green in CI
+on Linux and Windows.
 
 ## Architecture
 
@@ -224,7 +329,7 @@ npm install
 npm run build        # esbuild: node CLI bundle + 2 browser bundles
 npm run typecheck    # tsc, types only
 node dist/cli.js <server-url>
-npm test             # 20 scenario cases (both protocol revisions), all must pass
+npm test             # 26 assertions (both protocol revisions + host mode), all must pass
 ```
 
 A handy live target is the official example server:

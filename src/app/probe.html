@@ -1,0 +1,176 @@
+<!doctype html>
+<!--
+  mcp-app-debug host probe — the MCP App the fixture server serves.
+
+  Hand-rolled App Bridge protocol (no SDK) so the whole app ships as one small
+  inlined HTML file. Flow: direct "mounted" beacon → ui/initialize →
+  ui/notifications/initialized → wait for ui/notifications/tool-result →
+  report everything via the app-only `report` tool AND a direct "final"
+  beacon (two channels, so a broken app→server relay is itself observable).
+
+  __PROBE_CONFIG__ is replaced at serve time with { beaconUrl, version }.
+-->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>mcp-app-debug host probe</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; color: #1f2328; }
+      h3 { margin: 0 0 4px; }
+      #status { color: #57606a; }
+      ul { margin: 8px 0 0; padding-left: 20px; }
+      li b { font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <h3>mcp-app-debug host probe</h3>
+    <p id="status">initializing…</p>
+    <ul id="facts"></ul>
+    <script>
+      (() => {
+        const CFG = __PROBE_CONFIG__;
+        const state = {
+          origin: (() => { try { return location.origin; } catch { return "(unavailable)"; } })(),
+          referrer: document.referrer || "",
+          topAccessible: (() => {
+            try { void window.top.location.href; return true; } catch { return false; }
+          })(),
+          uiInitializeAnswered: false,
+          uiInitializeLatencyMs: null,
+          hostInfo: null,
+          sawToolInput: false,
+          sawToolResult: false,
+          toolResultHadStructuredContent: false,
+          probeToken: null,
+          toolResultMetaKeys: [],
+          cspViolations: [],
+        };
+        window.addEventListener("securitypolicyviolation", (e) => {
+          state.cspViolations.push({ violatedDirective: e.violatedDirective, blockedURI: e.blockedURI });
+        });
+
+        const fact = (label, value) => {
+          const li = document.createElement("li");
+          const b = document.createElement("b");
+          b.textContent = label + ": ";
+          li.appendChild(b);
+          li.appendChild(document.createTextNode(value));
+          document.getElementById("facts").appendChild(li);
+        };
+        const status = (text) => { document.getElementById("status").textContent = text; };
+
+        const post = (m) => window.parent.postMessage(m, "*");
+        let nextId = 1;
+        const pending = new Map();
+        const request = (method, params) =>
+          new Promise((resolve) => {
+            const id = nextId++;
+            pending.set(id, resolve);
+            post({ jsonrpc: "2.0", id, method, params });
+          });
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+        // The "mounted" beacon carries mount/origin facts ONLY — handshake and
+        // tool-result fields ride exclusively on the "final" one, so the
+        // fixture never judges a half-finished run.
+        const beacon = (phase) => {
+          const payload =
+            phase === "mounted"
+              ? {
+                  phase,
+                  origin: state.origin,
+                  referrer: state.referrer,
+                  topAccessible: state.topAccessible,
+                  cspViolations: state.cspViolations,
+                }
+              : { phase, ...state };
+          try {
+            // text/plain keeps this a "simple" cross-origin request (no
+            // preflight); the server records it even if the response is opaque.
+            fetch(CFG.beaconUrl, {
+              method: "POST",
+              headers: { "content-type": "text/plain" },
+              body: JSON.stringify(payload),
+            }).catch(() => {});
+          } catch {}
+        };
+
+        let toolResultSeen;
+        const toolResultWait = new Promise((resolve) => { toolResultSeen = resolve; });
+        window.addEventListener("message", (e) => {
+          const d = e.data;
+          if (!d || d.jsonrpc !== "2.0") return;
+          if (d.id !== undefined && (d.result !== undefined || d.error !== undefined)) {
+            const r = pending.get(d.id);
+            if (r) { pending.delete(d.id); r(d); }
+            return;
+          }
+          if (d.method === "ping" && d.id !== undefined) {
+            post({ jsonrpc: "2.0", id: d.id, result: {} });
+          } else if (d.method === "ui/notifications/tool-input") {
+            state.sawToolInput = true;
+          } else if (d.method === "ui/notifications/tool-result") {
+            state.sawToolResult = true;
+            const p = d.params ?? {};
+            state.toolResultHadStructuredContent = p.structuredContent !== undefined;
+            const meta = p._meta ?? p.meta;
+            state.toolResultMetaKeys = meta && typeof meta === "object" ? Object.keys(meta) : [];
+            state.probeToken =
+              meta && meta.ui && typeof meta.ui.probeToken === "string" ? meta.ui.probeToken : null;
+            toolResultSeen();
+          }
+        });
+
+        (async () => {
+          fact("sandbox origin", state.origin);
+          fact("window.top reachable", state.topAccessible ? "YES — no isolation" : "no (isolated)");
+          beacon("mounted");
+          const t0 = performance.now();
+          const answer = request("ui/initialize", {
+            protocolVersion: "2026-01-26",
+            appInfo: { name: "mcp-app-debug-probe", version: CFG.version },
+            appCapabilities: {},
+          });
+          const answered = await Promise.race([
+            answer.then(() => true),
+            sleep(6000).then(() => false), // = APP_INIT_WAIT_MS in host-checks.ts
+          ]);
+          if (answered) {
+            state.uiInitializeAnswered = true;
+            state.uiInitializeLatencyMs = Math.round(performance.now() - t0);
+            const resp = await answer;
+            state.hostInfo = (resp.result && resp.result.hostInfo) || null;
+            fact("ui/initialize", "answered in " + state.uiInitializeLatencyMs + " ms");
+            post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
+            status("initialized — waiting for the tool-result…");
+            await Promise.race([toolResultWait, sleep(8000)]); // = APP_TOOL_RESULT_WAIT_MS
+          } else {
+            fact("ui/initialize", "NOT answered within 6 s");
+          }
+          fact(
+            "tool-result",
+            state.sawToolResult
+              ? state.probeToken
+                ? "received, _meta.ui.probeToken intact"
+                : "received, but _meta.ui.probeToken is MISSING"
+              : "never arrived",
+          );
+          await sleep(150); // let late securitypolicyviolation events land
+          status("reporting to the fixture server…");
+          beacon("final");
+          // request() resolves on responses only — if the host never relays
+          // this tools/call, the status simply stays "reporting…".
+          const resp = await request("tools/call", {
+            name: "report",
+            arguments: { payload: { phase: "final", ...state } },
+          });
+          status(
+            resp.error
+              ? "report tools/call was rejected by the host — see the mcp-app-debug host terminal."
+              : "report delivered — check the mcp-app-debug host terminal for the verdict.",
+          );
+        })();
+      })();
+    </script>
+  </body>
+</html>
