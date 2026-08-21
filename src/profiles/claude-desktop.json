@@ -1,0 +1,19 @@
+{
+  "name": "claude-desktop",
+  "description": "Community-observed Claude Desktop knobs, not vendor documentation. Mirrors spec except that the sha256-derived _meta.ui.domain is enforced (a wrong value prevents the iframe from mounting). Silent no-mount reports for this host are tracked in ext-apps#671.",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": {
+    "frameAncestors": "'self'",
+    "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+    "defaultSrc": "'self' 'unsafe-inline'",
+    "objectSrc": "'self' 'unsafe-inline'"
+  },
+  "popupsAllowed": false,
+  "redeliversToolResult": true,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": true,
+  "sources": [
+    "https://github.com/modelcontextprotocol/ext-apps/issues/671",
+    "https://github.com/modelcontextprotocol/ext-apps/blob/main/docs/csp-cors.md"
+  ]
+}

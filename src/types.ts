@@ -22,9 +22,17 @@ export interface LogEntry {
     | "ui-initialize"
     | "ui-initialize-response"
     | "ui-ready"
-    | "csp-violation";
+    | "csp-violation"
+    | "tool-result-delivered"
+    | "second-call-sent"
+    | "second-tool-result"
+    | "second-tool-result-withheld"
+    | "cross-instance-leak"
+    | "instance2-skipped";
   /** extra structured data for markers (e.g. CSP violation details) */
   data?: Record<string, unknown>;
+  /** which app instance the entry belongs to (profile mode only; 1 when absent) */
+  instance?: number;
 }
 
 /** Config served to the host page at GET /config. */
@@ -49,6 +57,25 @@ export interface HarnessConfig {
   serverCapabilities: Record<string, unknown> | undefined;
   /** server-phase log entries emitted before the page loaded */
   backlog?: LogEntry[];
+  /** set only when --profile is active — drives checks 8-10 in the page */
+  profile?: HarnessProfileConfig;
+}
+
+/** The slice of an active profile descriptor the host page needs. */
+export interface HarnessProfileConfig {
+  name: string;
+  /** iframe sandbox attribute value (outer and inner) */
+  sandbox: string;
+  redeliversToolResult: boolean;
+  /** false when the descriptor's maxConcurrentInstances is 1 */
+  mountSecondInstance: boolean;
+  /** varied arguments for the second tools/call; null = tool is not argument-sensitive */
+  secondToolArgs: Record<string, unknown> | null;
+  /** human label for the varied argument, e.g. `city: "Tokyo-2"` */
+  secondToolLabel?: string;
+  /** per-instance markers planted in tool-result _meta so cross-instance
+   * leakage is detectable on the wire */
+  instanceNonces: [string, string];
 }
 
 /** Outcome of the protocol-revision negotiation (structural mirror of
@@ -63,6 +90,8 @@ export interface NegotiatedInfo {
   notes: string[];
 }
 
+export type CheckStatus = "pass" | "fail" | "info" | "skip";
+
 export interface CheckResult {
   id:
     | "resource-uri"
@@ -71,12 +100,17 @@ export interface CheckResult {
     | "ui-initialize"
     | "ui-ready"
     | "tool-call"
-    | "protocol-revision";
+    | "protocol-revision"
+    | "tool-result-redelivery"
+    | "multi-instance-isolation"
+    | "external-navigation";
   title: string;
   pass: boolean;
   detail: string;
   /** measured latency in ms where applicable */
   ms?: number;
+  /** four-state outcome, set in profile mode; absent means pass/fail only */
+  status?: CheckStatus;
 }
 
 export interface CheckReport {
@@ -86,6 +120,8 @@ export interface CheckReport {
   passed: number;
   failed: number;
   checks: CheckResult[];
+  /** profile mode only */
+  profile?: string;
 }
 
 /** Everything host.ts accumulates for checks.ts to evaluate. */
@@ -117,6 +153,42 @@ export interface HarnessState {
   /** the harness-simulated LLM tool call result (not counted for check e) */
   harnessToolCall?: { name: string; isError: boolean };
   interactNote?: string;
+
+  /* -- profile mode (checks 8-10); all undefined outside --profile runs -- */
+  /** first ui/notifications/tool-result reached the app (transport send) */
+  firstToolResultDeliveredAt?: number;
+  /** check 8 — second tools/call with varied arguments */
+  secondCall?: {
+    label?: string;
+    skipped?: string;
+    sentAt?: number;
+    resultAt?: number;
+    resultIsError?: boolean;
+    resultErrorMsg?: string;
+    /** second ui/notifications/tool-result reached the app */
+    deliveredAt?: number;
+    /** profile models a host that does not redeliver (ext-apps#750 symptom 1) */
+    withheld?: boolean;
+  };
+  /** check 9 — second concurrent instance of the same view */
+  instance2?: {
+    skipped?: string;
+    mountedAt?: number;
+    uiInitializeRespondedAt?: number;
+    readyAt?: number;
+    /** frames observed on instance 1 carrying instance 2's marker, and vice versa */
+    leaksOn1: number;
+    leaksOn2: number;
+  };
+  /** check 10 — external-navigation probe from inside the sandbox */
+  navProbe?: {
+    popupsAllowed: boolean;
+    windowOpen?: "opened" | "blocked";
+    anchor?: "opened" | "blocked";
+    /** a console message named the sandbox as the blocker */
+    sandboxConsoleSeen?: boolean;
+    error?: string;
+  };
 }
 
 /* ------------------------------------------------------- host-conformance */

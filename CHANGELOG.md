@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.6.0 — 2026-08-21
+
+**Host profiles: separate app fault from host fault.**
+
+[ext-apps#750](https://github.com/modelcontextprotocol/ext-apps/issues/750)
+(MoonPay Paybox, 2026-08-19) reports the same MCP App resource rendering on
+ChatGPT and Claude but breaking on Grok four ways: stale UI because tool-result
+is never redelivered after state changes, signing surfaces hanging inside the
+iframe, duplicate concurrent widget instances with no coordination, and missed
+`ui/initialize` handshakes.
+[ext-apps#671](https://github.com/modelcontextprotocol/ext-apps/issues/671)
+(open since 2026-05-27, reporters on Claude Desktop, claude.ai web, iOS and
+Cowork) is the same question from the other side: "the tool runs and returns
+normally, but no iframe mounts". The seven existing checks are all mount-time
+and single-widget, so they cannot say which side is at fault. This release can.
+
+On prior art, following the 0.5.0 precedent: `@apollo/mcp-impostor-host` 0.3.0
+impersonates a single generic host as a Playwright fixture for tests you write
+yourself, and `@modelcontextprotocol/conformance` carries no apps/UI scenarios
+(its suites cover client, server, auth and tasks). The new thing here is the
+divergence matrix across host profiles and the fault-attribution verdict.
+
+### Added
+
+- **`--profile <spec|claude-desktop|claude-web|chatgpt|grok|all>`** (also
+  accepts a path to your own descriptor `.json`). `spec` is normative
+  (2026-07-28 spec + ext-apps 1.7.x defaults: strict CSP without
+  `unsafe-eval` per 1.7.0's `allowUnsafeEval: false`, `object-src` synced
+  with `default-src` per 1.7.5). Every other profile is a community-observed
+  report whose knobs cite the ext-apps issue or SDK release they come from —
+  a descriptor with an empty `sources` array is rejected at load time (zod).
+  Non-spec profiles run after a spec baseline so the verdict is computable.
+- **Checks 8-10**, numbered after the existing seven:
+  - **8 tool-result redelivery** — a second `tools/call` with varied
+    arguments through the same negotiated connection; PASS when a second
+    `tool-result` reaches the already-mounted app. SKIPs when the tool is not
+    argument-sensitive. FAIL under `grok` models #750 symptom 1.
+  - **9 multi-instance isolation** — the same view mounted twice in one
+    page; PASS needs two distinct `ui/initialize` handshakes and zero
+    cross-instance postMessage (per-instance `_meta` markers make leakage
+    observable). SKIPs when a second `resources/read` fails (singleton).
+  - **10 external navigation** — `window.open` plus a `target=_blank` click
+    from inside the sandbox. INFO under spec (no `allow-popups`); FAIL only
+    when the active profile sets `popupsAllowed: true` and navigation is
+    still blocked, distinguishing a sandbox-level block from a browser-level
+    one.
+- **Verdict**: `APP-FAULT` (a check fails under spec), `APP-OK-HOST-SUSPECT`
+  (passes under spec, fails under a named profile), `APP-OK`. Exit 1 only on
+  APP-FAULT. `--profile all` prints a 10×5 PASS/FAIL/INFO matrix; `--json`
+  emits `{verdict, profile, matrix, evidence[]}` with per-check raw messages,
+  shaped for pasting into an ext-apps issue. `--video` records one file per
+  profile, suffixed with the profile name.
+- Test fixtures (`test/profile-server.mjs` + `test/profiles/`, HTTP or
+  `--stdio`): an argument-sensitive weather tool, a server whose varied second
+  call errors, a view that leaks tool-results across instances via a shared
+  storage key, a view that calls `window.open` on load, a tool with no
+  arguments to vary, and a singleton `ui://` resource that can only be read
+  once. Thirteen new suite cases including a `--profile all` matrix snapshot,
+  both honest SKIPs, profile-over-stdio, per-profile artifact suffixing and a
+  rejected `sources: []` descriptor, plus `test/checks-unit.ts` covering the
+  checks 8-10 decision logic directly (including a browser-level popup block
+  as opposed to a sandbox-level one, which a real browser cannot force
+  reliably) — 40 assertions plus 22 unit assertions, all green.
+
+### Unchanged by design
+
+- `mcp-app-debug <server-url>` without `--profile` is byte-identical to
+  0.5.0 (all 26 existing assertions unchanged), and host mode's seven checks
+  are untouched. As before, this tool does not claim to verify host
+  compliance with SEP-1865 — non-spec profiles are community-observed
+  reports, not vendor documentation, and only `spec` is normative.
+
 ## 0.5.0 — 2026-08-14
 
 **Host-conformance mode: `mcp-app-debug host` grades the other end of the

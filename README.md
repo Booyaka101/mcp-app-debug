@@ -8,7 +8,9 @@ error, no log, the iframe just never appears
 the **same App Bridge + double-iframe sandbox path** as spec-conformant
 clients, shows **every postMessage exchange live in a side panel**, and gives
 you **7 automated PASS/FAIL diagnostics** that tell you exactly where the flow
-broke. It speaks **both current MCP revisions** — the stateless 2026-07-28
+broke. When it renders on one host but not another, `--profile` adds three
+cross-host checks and tells you **whether the fault is yours or the host's** —
+see [Host profiles](#host-profiles-and-the-fault-verdict---profile). It speaks **both current MCP revisions** — the stateless 2026-07-28
 protocol (`server/discover`, `_meta` envelopes) and the 2025-11-25
 `initialize` handshake — and auto-detects which one your server is on.
 
@@ -95,6 +97,153 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
 Beyond the checks, the log surfaces the evidence silent failures hide: app
 `console.error`s, uncaught exceptions, failed network requests, CSP violation
 details, and every JSON-RPC frame with direction and timing.
+
+## Host profiles and the fault verdict (`--profile`)
+
+When an app renders on one host and breaks on another, the first question is
+whether the bug is yours.
+[ext-apps #750](https://github.com/modelcontextprotocol/ext-apps/issues/750)
+is the shape of it: the same resource renders on ChatGPT and Claude but goes
+stale, hangs or duplicates on Grok.
+[ext-apps #671](https://github.com/modelcontextprotocol/ext-apps/issues/671)
+is the same question from the other side — "the tool runs and returns
+normally, but no iframe mounts". The seven checks above are all mount-time and
+single-widget, so they cannot tell those apart. `--profile` can.
+
+```bash
+npx mcp-app-debug http://localhost:8787/mcp --profile spec      # normative baseline
+npx mcp-app-debug http://localhost:8787/mcp --profile grok      # spec, then grok
+npx mcp-app-debug http://localhost:8787/mcp --profile all       # the divergence matrix
+npx mcp-app-debug http://localhost:8787/mcp --profile all --json
+```
+
+A profile is a descriptor of the **observable knobs** a host applies — sandbox
+tokens, CSP directives, whether popups are allowed, whether `tool-result` is
+redelivered after a state change, how many concurrent instances mount, and
+whether `_meta.ui.domain` is enforced. Naming a non-spec profile runs the spec
+baseline first, so the verdict is always computable.
+
+> **Only `spec` is normative.** It mirrors the
+> [2026-07-28 spec](https://modelcontextprotocol.io/specification/2026-07-28/basic/index)
+> and ext-apps 1.7.x defaults (strict CSP with no `unsafe-eval`, since
+> `AppOptions.allowUnsafeEval` defaults to `false` in
+> [v1.7.0](https://github.com/modelcontextprotocol/ext-apps/releases/tag/v1.7.0);
+> `object-src` synced with `default-src` per
+> [v1.7.5](https://github.com/modelcontextprotocol/ext-apps/releases/tag/v1.7.5)).
+> The `claude-desktop`, `claude-web`, `chatgpt` and `grok` profiles are
+> **community-observed reports, not vendor documentation**. Nobody from those
+> vendors publishes these knobs; each one is derived from a public issue or an
+> SDK release, and every descriptor must cite its sources — a descriptor with
+> an empty `sources` array is refused at load time. They are a way to
+> reproduce a reported symptom locally, not a claim about what any vendor's
+> host does today. This tool still does not claim to verify host compliance
+> with SEP-1865. Read `src/profiles/*.json`; they are short, and you can pass
+> your own descriptor path instead of a built-in name.
+
+### Checks 8-10 (profile mode only)
+
+8. **tool-result redelivery** — a second `tools/call` with *different*
+   arguments goes through the same connection to the already-mounted app.
+   PASS when a second `tool-result` reaches it. This is #750's symptom 1:
+   the widget showing a completed transaction as still pending.
+   `SKIP`s honestly when the tool takes no arguments to vary.
+9. **multi-instance isolation** — the same view is mounted **twice in one
+   page**. PASS needs two distinct `ui/initialize` handshakes *and* zero
+   postMessages crossing between them (each instance's `tool-result` carries
+   its own `_meta` marker, so leakage is visible on the wire). `SKIP`s when
+   the server returns a singleton `ui://` resource that cannot be read twice.
+10. **external navigation** — `window.open` and a `target=_blank` click from
+    inside the sandbox. `INFO` under spec (the sandbox has no `allow-popups`,
+    so blocking is correct and worth *recording*, not failing). It only FAILs
+    when the active profile grants popups and navigation is blocked anyway,
+    and it distinguishes a sandbox-level block from a browser-level one.
+
+The verdict then attributes fault:
+
+| Verdict | Meaning | Exit |
+| --- | --- | --- |
+| `APP-FAULT` | a check fails under **spec** — fix your app before blaming a host | 1 |
+| `APP-OK-HOST-SUSPECT` | passes under spec, fails under a named profile — the divergence is host-side | 0 |
+| `APP-OK` | everything passes everywhere it ran | 0 |
+
+### Real run against a third-party server
+
+Captured output, not hand-written: this is `--profile all` against
+[primevalsoup/mcp-apps-claude-demo](https://github.com/primevalsoup/mcp-apps-claude-demo),
+the minimal cross-host demo #750 cites as working, cloned and served locally on
+port 8787.
+
+```
+                                  spec            claude-desktop  claude-web      chatgpt         grok
+1 ui:// resource resolves         PASS            PASS            PASS            PASS            PASS
+2 CSP permits embedding & assets  PASS            PASS            PASS            PASS            PASS
+3 _meta.ui.domain origin          FAIL            FAIL            FAIL            INFO            INFO
+4 ui/initialize handshake         PASS            PASS            PASS            PASS            PASS
+5 ui/ready notification           PASS            PASS            PASS            PASS            PASS
+6 app-initiated tools/call        FAIL            FAIL            FAIL            FAIL            FAIL
+7 protocol revision               PASS            PASS            PASS            PASS            PASS
+8 tool-result redelivery          SKIP            SKIP            SKIP            SKIP            SKIP
+9 multi-instance isolation        PASS            PASS            PASS            PASS            PASS
+10 external navigation            INFO            INFO            INFO            INFO            INFO
+
+VERDICT: APP-FAULT — _meta.ui.domain origin, app-initiated tools/call fail(s) under the spec profile; fix the app/server before suspecting any host
+```
+
+Row 3 is the whole point of the matrix: the same observation is a FAIL on the
+Claude profiles and an INFO on `chatgpt`/`grok`, because only Claude hosts are
+reported to derive that value. Read the detail line and the reason is concrete
+rather than mysterious:
+
+```
+FAIL   3 _meta.ui.domain origin  declared "187f71d263d6cc8b3a92ca14ca4055b2.claudemcpcontent.com" but this
+                                 endpoint derives "1e7037d0e74fbc84d7746b9da9adb5bc.claudemcpcontent.com" —
+                                 that value is the hash of the same URL with the scheme swapped; recompute it
+                                 from the exact URL the connector was added with.
+SKIP   8 tool-result redelivery  tool is not argument-sensitive — it has no input property to vary between calls
+INFO  10 external navigation     blocked by sandbox (no allow-popups) — window.open blocked, target=_blank blocked
+```
+
+Both spec failures are honest and specific to running it *locally*. That demo
+computes its domain from `https://<host>/mcp` because it is meant to sit behind
+an HTTPS tunnel, while this run reached it over plain `http://localhost:8787`
+— so check 3 correctly reports a scheme-swap near miss that would not occur
+behind the tunnel. Its `get_stats` widget is a static bar chart with no button,
+so nothing provokes an app-initiated `tools/call` (check 6) and there is no
+argument to vary (check 8 SKIPs rather than inventing a failure). None of this
+is a defect in that demo; it is what running a tunnel-shaped server on
+localhost actually looks like, and the tool says so in words you can act on.
+
+Here is the same thing against a fixture where every check resolves — note the
+two instances mounted side by side for check 9, the redelivery probe in the
+log, and the chips for checks 8-10 along the top:
+
+![profile mode: ten checks, two mounted instances, redelivery probe in the log](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/profile-spec.png)
+
+### `--json` for an issue report
+
+`--profile … --json` emits `{verdict, profile, matrix, evidence[]}`, shaped so
+you can paste it straight into an ext-apps issue. `matrix.cells[row][col]`
+follows `matrix.checks` × `matrix.profiles`, and each `evidence` entry carries
+the observation plus the raw protocol frames behind it:
+
+```json
+{"verdict":"APP-OK-HOST-SUSPECT","profile":"grok",
+ "matrix":{"checks":["resource-uri","csp","ui-domain","ui-initialize","ui-ready","tool-call",
+                     "protocol-revision","tool-result-redelivery","multi-instance-isolation","external-navigation"],
+           "profiles":["spec","grok"],
+           "cells":[["PASS","PASS"],["PASS","PASS"],["PASS","PASS"],["PASS","PASS"],["PASS","PASS"],
+                    ["PASS","PASS"],["PASS","PASS"],["PASS","FAIL"],["PASS","PASS"],["INFO","INFO"]]},
+ "evidence":[{"check":"tool-result-redelivery","profile":"spec",
+              "observation":"PASS: second tool-result observed after 7ms (city: \"Tokyo-2\")","timestampMs":7,
+              "rawMessages":["+946ms server event tools/call (redelivery probe) {\"city\":\"Tokyo-2\"}", "…"]},
+             {"check":"tool-result-redelivery","profile":"grok",
+              "observation":"FAIL: app received tool-result #1 but the grok profile models a host that does not redeliver tool-result after further tools/call (ext-apps#750 symptom 1) — the app is left showing stale state",
+              "timestampMs":null,"rawMessages":["…"]}]}
+```
+
+With `--profile all`, `--video`, `--screenshot` and `--log-file` are written
+once per profile, suffixed with the profile name
+(`session.spec.webm`, `session.grok.webm`, …).
 
 ## Grade a host (`host` conformance mode)
 
@@ -272,6 +421,9 @@ everything else looks healthy.
 --stdio              target is a stdio server command (write it after --)
 --header <n:v>       extra HTTP header, repeatable ("Authorization: Bearer …")
 --protocol <rev>     auto | 2026-07-28 | 2025-11-25   (default: auto)
+--profile <name>     spec | claude-desktop | claude-web | chatgpt | grok | all
+                     (or a path to your own descriptor .json) — adds checks
+                     8-10 and the fault verdict; omit for the 7-check run
 --tool <name>        tool to render (default: first tool with _meta.ui.resourceUri)
 --args <json>        tool arguments (default: inputSchema defaults)
 --mode <mode>        trusted | strict | 3p            (default: trusted)
@@ -299,11 +451,32 @@ scenarios, `discover-missing` and `no-ui-extension`. For host mode,
 `test/fake-host.mjs` is a minimal conformant host (Playwright + the same
 double-iframe sandbox files the package ships) with `--drop` (the
 pydantic-ai#6613 shape: no `capabilities.extensions`, tool-result `_meta`
-stripped) and `--list-only` modes. `npm test` asserts every scenario trips
-exactly the right checks on its revision (the shared scenarios trip identical
-check ids on both), plus strict-mode, stdio (both revisions),
-forced-`--protocol` and five host-mode cases — 26 assertions, all green in CI
-on Linux and Windows.
+stripped) and `--list-only` modes.
+
+For profile mode, `test/profile-server.mjs` ships six scenarios (HTTP or
+`--stdio`): `weather` (an argument-sensitive tool, so checks 8-10 all
+resolve), `first-only` (the varied second call errors — check 8 FAILs),
+`leak` (a view that broadcasts its tool-result to sibling instances through a
+shared storage key — check 9 FAILs), `popup` (a view that calls `window.open`
+on load), `noargs` (nothing to vary — check 8 must SKIP, not fail) and
+`singleton` (the `ui://` resource can only be read once — check 9 must SKIP).
+`test/profiles/` holds descriptor fixtures, including one with `sources: []`
+that must be refused at load and one that claims `popupsAllowed` while
+withholding the `allow-popups` token, which check 10 must catch and blame on
+the sandbox.
+
+`test/checks-unit.ts` asserts the checks 8-10 decision logic directly, for the
+branches a real browser cannot force reliably — a browser-level popup block as
+opposed to a sandbox-level one, or a second instance that mounts but never
+completes its handshake. Those are exactly the branches whose wording a user
+acts on, so they are tested rather than left unexecuted.
+
+`npm test` asserts every scenario trips exactly the right checks on its
+revision (the shared scenarios trip identical check ids on both), plus
+strict-mode, stdio (both revisions), forced-`--protocol`, five host-mode cases
+and thirteen profile cases — a `--profile all` matrix snapshot, both honest
+SKIPs, profile-over-stdio, and per-profile artifact suffixing — for 40
+assertions, plus 22 unit assertions. All green in CI on Linux and Windows.
 
 ## Architecture
 
@@ -320,7 +493,13 @@ on Linux and Windows.
   logging transport wrapped around `PostMessageTransport`.
 - The sandbox (`src/web/sandbox-page.ts`) is a port of the official basic-host
   double-iframe sandbox, served on a separate origin with the CSP header built
-  by the official policy logic, plus CSP-violation relay.
+  by the official policy logic, plus CSP-violation relay. A frame's sandbox
+  flags are fixed when its browsing context is created, so when a profile
+  overrides the tokens the inner iframe is replaced rather than mutated in
+  place — `setAttribute("sandbox", …)` on a live frame is silently ignored.
+- Profiles (`src/profiles/`) are plain JSON validated with zod at load time and
+  shipped in the package; `src/profile-run.ts` runs the scan once per
+  descriptor and computes the verdict.
 
 ## Development
 
@@ -329,7 +508,7 @@ npm install
 npm run build        # esbuild: node CLI bundle + 2 browser bundles
 npm run typecheck    # tsc, types only
 node dist/cli.js <server-url>
-npm test             # 26 assertions (both protocol revisions + host mode), all must pass
+npm test             # 40 assertions + 22 unit assertions, all must pass
 ```
 
 A handy live target is the official example server:

@@ -10,6 +10,8 @@
 import { Command, InvalidArgumentError } from "commander";
 import { runHostConformance } from "./fixture-server.js";
 import { runDebugHost } from "./host.js";
+import { runProfiled } from "./profile-run.js";
+import { PROFILE_NAMES } from "./profiles/index.js";
 
 const program = new Command();
 
@@ -43,6 +45,12 @@ program
       return value;
     },
     "auto",
+  )
+  .option(
+    "--profile <name>",
+    "host profile: spec | claude-desktop | claude-web | chatgpt | grok | all, or a path to a " +
+      "descriptor .json — adds checks 8-10 and a fault-attribution verdict (non-spec profiles " +
+      "run after a spec baseline)",
   )
   .option("--tool <name>", "tool to render (default: first tool declaring _meta.ui.resourceUri)")
   .option("--args <json>", "tool arguments as JSON object (default: inputSchema defaults)")
@@ -169,7 +177,17 @@ Examples:
       }
     }
 
-    const exitCode = await runDebugHost({
+    if (options.profile !== undefined) {
+      const p: string = options.profile;
+      if (!PROFILE_NAMES.includes(p as never) && p !== "all" && !p.endsWith(".json")) {
+        fail(
+          `error: unknown profile "${p}" — valid names: ${PROFILE_NAMES.join(", ")}, all ` +
+            "(or a path to a descriptor .json)",
+        );
+      }
+    }
+
+    const hostOpts = {
       connect,
       protocol: options.protocol,
       tool: options.tool,
@@ -185,7 +203,10 @@ Examples:
       screenshot: options.screenshot,
       video: options.video,
       logFile: options.logFile,
-    });
+    };
+    const exitCode = options.profile
+      ? await runProfiled(hostOpts, options.profile)
+      : await runDebugHost(hostOpts);
     process.exitCode = exitCode;
     // Flush stdout before hard exit — on Windows, process.exit() truncates
     // pending pipe writes, silently eating the --json output under npx.

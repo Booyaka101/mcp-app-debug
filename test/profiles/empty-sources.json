@@ -1,0 +1,1 @@
+﻿{ "name": "empty-sources", "description": "invalid fixture", "sandboxTokens": ["allow-scripts"], "csp": { "frameAncestors": "'self'", "scriptSrc": "'self'", "defaultSrc": "'self'", "objectSrc": "'self'" }, "popupsAllowed": false, "redeliversToolResult": true, "maxConcurrentInstances": 2, "honoursUiDomain": false, "sources": [] }
