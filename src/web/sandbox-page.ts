@@ -53,10 +53,27 @@ function violationListener(where: string) {
 
 window.addEventListener("securitypolicyviolation", violationListener("sandbox"));
 
-const inner = document.createElement("iframe");
+const DEFAULT_SANDBOX = "allow-scripts allow-same-origin allow-forms";
+
+let inner = document.createElement("iframe");
 inner.style.cssText = "width:100%; height:100%; border:none;";
-inner.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
+inner.setAttribute("sandbox", DEFAULT_SANDBOX);
 document.body.appendChild(inner);
+
+/**
+ * A frame's sandbox flags are fixed when its browsing context is created, so
+ * setAttribute() on the live iframe would be silently ignored — the document
+ * has to be replaced. Only called when the host actually overrides the tokens.
+ */
+function recreateInnerWithSandbox(sandbox: string): void {
+  const replacement = document.createElement("iframe");
+  replacement.style.cssText = inner.style.cssText;
+  replacement.setAttribute("sandbox", sandbox);
+  const allow = inner.getAttribute("allow");
+  if (allow) replacement.setAttribute("allow", allow);
+  inner.replaceWith(replacement);
+  inner = replacement;
+}
 
 // Method names per the MCP Apps spec (McpUiSandbox*Notification types)
 const RESOURCE_READY_NOTIFICATION = "ui/notifications/sandbox-resource-ready";
@@ -68,9 +85,11 @@ window.addEventListener("message", (event: MessageEvent) => {
 
     if (event.data && event.data.method === RESOURCE_READY_NOTIFICATION) {
       const { html, sandbox, permissions } = event.data.params ?? {};
-      if (typeof sandbox === "string") inner.setAttribute("sandbox", sandbox);
       const allowAttribute = buildAllowAttribute(permissions);
       if (allowAttribute) inner.setAttribute("allow", allowAttribute);
+      if (typeof sandbox === "string" && sandbox !== inner.getAttribute("sandbox")) {
+        recreateInnerWithSandbox(sandbox);
+      }
       if (typeof html === "string") {
         // document.write (not srcdoc) so the inner doc inherits this page's
         // origin and header-delivered CSP — same as the official sandbox.

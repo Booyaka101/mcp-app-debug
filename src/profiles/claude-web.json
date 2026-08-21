@@ -1,0 +1,19 @@
+{
+  "name": "claude-web",
+  "description": "Community-observed claude.ai web knobs, not vendor documentation. Mirrors spec except that _meta.ui.domain is enforced — measured in a 36-render controlled A/B posted to ext-apps#671 (absent: mounts with a rotating origin; correct: mounts with a stable origin; wrong: 0/8 mounts).",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": {
+    "frameAncestors": "'self'",
+    "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+    "defaultSrc": "'self' 'unsafe-inline'",
+    "objectSrc": "'self' 'unsafe-inline'"
+  },
+  "popupsAllowed": false,
+  "redeliversToolResult": true,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": true,
+  "sources": [
+    "https://github.com/modelcontextprotocol/ext-apps/issues/671",
+    "https://github.com/modelcontextprotocol/ext-apps/blob/main/docs/csp-cors.md"
+  ]
+}

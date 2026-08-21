@@ -1,0 +1,18 @@
+{
+  "name": "grok",
+  "description": "Community-observed Grok knobs from ext-apps#750 (MoonPay Paybox report, 2026-08-19), not vendor documentation. Varies from spec only in what #750 observes: tool-result is not redelivered after state changes (symptom 1, stale UI), duplicate concurrent widget instances occur (symptom 3), embedded signing/passkey surfaces hang so popups stay blocked (symptom 2), and the Claude-scheme _meta.ui.domain is not modelled as enforced.",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": {
+    "frameAncestors": "'self'",
+    "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+    "defaultSrc": "'self' 'unsafe-inline'",
+    "objectSrc": "'self' 'unsafe-inline'"
+  },
+  "popupsAllowed": false,
+  "redeliversToolResult": false,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": false,
+  "sources": [
+    "https://github.com/modelcontextprotocol/ext-apps/issues/750"
+  ]
+}

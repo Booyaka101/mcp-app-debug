@@ -1,0 +1,21 @@
+{
+  "name": "spec",
+  "description": "Normative baseline: the 2026-07-28 MCP spec plus ext-apps 1.7.x defaults — strict CSP without 'unsafe-eval' (AppOptions.allowUnsafeEval defaults to false since 1.7.0), object-src synced with default-src (1.7.5), and the basic-host sandbox token set.",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": {
+    "frameAncestors": "'self'",
+    "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+    "defaultSrc": "'self' 'unsafe-inline'",
+    "objectSrc": "'self' 'unsafe-inline'"
+  },
+  "popupsAllowed": false,
+  "redeliversToolResult": true,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": true,
+  "sources": [
+    "https://modelcontextprotocol.io/specification/2026-07-28/basic/index",
+    "https://github.com/modelcontextprotocol/ext-apps/releases/tag/v1.7.0",
+    "https://github.com/modelcontextprotocol/ext-apps/releases/tag/v1.7.5",
+    "https://github.com/modelcontextprotocol/ext-apps/blob/main/examples/basic-host/src/sandbox.ts"
+  ]
+}

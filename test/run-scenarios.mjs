@@ -6,6 +6,10 @@
  * Usage: node test/run-scenarios.mjs
  */
 import { spawn, execFile } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // scenario → { mustFail: [...check ids], mustPass: [...check ids],
@@ -398,6 +402,266 @@ await hostCase("host-list-only", {
     mustPass: ["resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"],
     detailContains: { "protocol-revision": "negotiated 2026-07-28 via server/discover" },
   });
+}
+
+/**
+ * --profile scenarios (checks 8-10, verdict, matrix). Fixtures live in
+ * test/profile-server.mjs; descriptor fixtures in test/profiles/.
+ */
+function fail(name, problems) {
+  failures++;
+  console.error(`FAIL ${name}:`);
+  for (const p of problems) console.error(`   - ${p}`);
+}
+
+async function profileCase(name, { scenario, port, profile, expect }) {
+  const server = spawn(process.execPath, ["test/profile-server.mjs", scenario, String(port)], { stdio: "ignore" });
+  try {
+    await waitForServer(`http://localhost:${port}/mcp`);
+    const { code, stdout } = await runCli([
+      `http://localhost:${port}/mcp`, "--json", "--profile", profile, "--timeout", "12",
+    ]);
+    let out;
+    try {
+      out = JSON.parse(stdout);
+    } catch {
+      fail(name, [`no JSON on stdout (exit ${code}): ${stdout.slice(0, 300)}`]);
+      return;
+    }
+    const problems = [];
+    if (out.verdict !== expect.verdict) problems.push(`expected verdict ${expect.verdict}, got ${out.verdict}`);
+    if (code !== expect.exit) problems.push(`expected exit ${expect.exit}, got ${code}`);
+    for (const [checkId, want] of Object.entries(expect.cells ?? {})) {
+      const row = out.matrix.checks.indexOf(checkId);
+      const col = out.matrix.profiles.indexOf(want.profile);
+      const got = row >= 0 && col >= 0 ? out.matrix.cells[row][col] : "(missing)";
+      if (got !== want.cell) problems.push(`expected ${checkId}@${want.profile} = ${want.cell}, got ${got}`);
+    }
+    for (const [checkId, substring] of Object.entries(expect.observationContains ?? {})) {
+      const ev = out.evidence.filter((e) => e.check === checkId).map((e) => e.observation).join(" || ");
+      if (!ev.includes(substring)) problems.push(`expected ${checkId} evidence to contain ${JSON.stringify(substring)}, got: ${ev.slice(0, 300)}`);
+    }
+    if (expect.matrixSnapshot) {
+      const got = JSON.stringify(out.matrix);
+      const want = JSON.stringify(expect.matrixSnapshot);
+      if (got !== want) problems.push(`matrix snapshot mismatch\n     want ${want}\n     got  ${got}`);
+    }
+    if (problems.length) fail(name, problems);
+    else console.log(`ok   ${name} (${out.verdict})`);
+  } finally {
+    server.kill();
+  }
+}
+
+// unknown profile name → exit 2, valid names listed, no JSON
+{
+  const { code, stdout, stderr } = await runCli(["http://localhost:9/mcp", "--profile", "nosuch"]);
+  const problems = [];
+  if (code !== 2) problems.push(`expected exit 2, got ${code}`);
+  if (stdout.trim() !== "") problems.push(`expected no stdout, got: ${stdout.slice(0, 120)}`);
+  if (!/spec, claude-desktop, claude-web, chatgpt, grok/.test(stderr)) problems.push(`expected stderr to list valid profile names; got: ${stderr.slice(-300)}`);
+  problems.length ? fail("profile-unknown-name", problems) : console.log("ok   profile-unknown-name (exit 2, names listed)");
+}
+
+// descriptor with sources: [] → rejected at load, exit 2
+{
+  const { code, stdout, stderr } = await runCli(["http://localhost:9/mcp", "--profile", "test/profiles/empty-sources.json"]);
+  const problems = [];
+  if (code !== 2) problems.push(`expected exit 2, got ${code}`);
+  if (stdout.trim() !== "") problems.push(`expected no stdout, got: ${stdout.slice(0, 120)}`);
+  if (!/sources/.test(stderr)) problems.push(`expected stderr to name the sources rule; got: ${stderr.slice(-300)}`);
+  problems.length ? fail("profile-empty-sources", problems) : console.log("ok   profile-empty-sources (rejected at load)");
+}
+
+await profileCase("profile-spec-ok", {
+  scenario: "weather", port: 3411, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: {
+      "tool-result-redelivery": { profile: "spec", cell: "PASS" },
+      "multi-instance-isolation": { profile: "spec", cell: "PASS" },
+      "external-navigation": { profile: "spec", cell: "INFO" },
+    },
+    observationContains: { "external-navigation": "blocked by sandbox (no allow-popups)" },
+  },
+});
+
+await profileCase("profile-grok-host-suspect", {
+  scenario: "weather", port: 3412, profile: "grok",
+  expect: {
+    verdict: "APP-OK-HOST-SUSPECT", exit: 0,
+    cells: {
+      "tool-result-redelivery": { profile: "spec", cell: "PASS" },
+      "tool-result-redelivery": { profile: "grok", cell: "FAIL" },
+    },
+    observationContains: { "tool-result-redelivery": "ext-apps#750" },
+  },
+});
+
+await profileCase("profile-first-only-app-fault", {
+  scenario: "first-only", port: 3413, profile: "spec",
+  expect: {
+    verdict: "APP-FAULT", exit: 1,
+    cells: { "tool-result-redelivery": { profile: "spec", cell: "FAIL" } },
+    observationContains: { "tool-result-redelivery": "isError" },
+  },
+});
+
+await profileCase("profile-leak-app-fault", {
+  scenario: "leak", port: 3414, profile: "spec",
+  expect: {
+    verdict: "APP-FAULT", exit: 1,
+    cells: { "multi-instance-isolation": { profile: "spec", cell: "FAIL" } },
+    observationContains: { "multi-instance-isolation": "message(s) addressed to instance" },
+  },
+});
+
+await profileCase("profile-popups-open", {
+  scenario: "popup", port: 3415, profile: "test/profiles/popups-open.json",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: { "external-navigation": { profile: "popups-open", cell: "PASS" } },
+  },
+});
+
+await profileCase("profile-popups-broken", {
+  scenario: "popup", port: 3416, profile: "test/profiles/popups-broken.json",
+  expect: {
+    verdict: "APP-OK-HOST-SUSPECT", exit: 0,
+    cells: { "external-navigation": { profile: "popups-broken", cell: "FAIL" } },
+    observationContains: { "external-navigation": "sandbox" },
+  },
+});
+
+// --profile all: 10-row × 5-column matrix snapshot + verdict
+// grok fails check 8 by descriptor (redeliversToolResult:false), so a healthy
+// app under --profile all is APP-OK-HOST-SUSPECT, not APP-OK.
+await profileCase("profile-all-matrix-snapshot", {
+  scenario: "weather", port: 3417, profile: "all",
+  expect: {
+    verdict: "APP-OK-HOST-SUSPECT", exit: 0,
+    matrixSnapshot: {
+      checks: [
+        "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call",
+        "protocol-revision", "tool-result-redelivery", "multi-instance-isolation", "external-navigation",
+      ],
+      profiles: ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"],
+      cells: [
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "FAIL"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["INFO", "INFO", "INFO", "INFO", "INFO"],
+      ],
+    },
+  },
+});
+
+// Honest SKIPs: the two cases the brief calls out as "skip, do not fail".
+await profileCase("profile-noargs-skip8", {
+  scenario: "noargs", port: 3418, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: { "tool-result-redelivery": { profile: "spec", cell: "SKIP" } },
+    observationContains: { "tool-result-redelivery": "not argument-sensitive" },
+  },
+});
+
+await profileCase("profile-singleton-skip9", {
+  scenario: "singleton", port: 3419, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: { "multi-instance-isolation": { profile: "spec", cell: "SKIP" } },
+    observationContains: { "multi-instance-isolation": "singleton ui:// resource" },
+  },
+});
+
+// Profile mode over stdio (the transport has no HTTP endpoint to hash, and
+// checks 8-10 must still resolve).
+{
+  const { code, stdout } = await runCli([
+    "--json", "--profile", "spec", "--timeout", "14",
+    "--stdio", "--", process.execPath, "test/profile-server.mjs", "weather", "--stdio",
+  ]);
+  const problems = [];
+  let out;
+  try {
+    out = JSON.parse(stdout);
+  } catch {
+    problems.push(`no JSON on stdout (exit ${code}): ${stdout.slice(0, 200)}`);
+  }
+  if (out) {
+    if (out.verdict !== "APP-OK") problems.push(`expected APP-OK, got ${out.verdict}`);
+    if (out.matrix.checks.length !== 10) problems.push(`expected 10 rows, got ${out.matrix.checks.length}`);
+    const row = out.matrix.checks.indexOf("tool-result-redelivery");
+    if (out.matrix.cells[row][0] !== "PASS") problems.push(`expected check 8 PASS over stdio, got ${out.matrix.cells[row][0]}`);
+  }
+  if (code !== 0) problems.push(`expected exit 0, got ${code}`);
+  problems.length ? fail("profile-stdio", problems) : console.log("ok   profile-stdio (APP-OK, 10 rows)");
+}
+
+// --profile with artifacts: one file per profile, suffixed with its name.
+{
+  const dir = await mkdtemp(path.join(tmpdir(), "mcp-app-debug-artifacts-"));
+  const server = spawn(process.execPath, ["test/profile-server.mjs", "weather", "3420"], { stdio: "ignore" });
+  try {
+    await waitForServer("http://localhost:3420/mcp");
+    const { code } = await runCli([
+      "http://localhost:3420/mcp", "--json", "--profile", "grok", "--timeout", "14",
+      "--video", path.join(dir, "sess.webm"),
+      "--log-file", path.join(dir, "log.ndjson"),
+      "--screenshot", path.join(dir, "shot.png"),
+    ]);
+    const problems = [];
+    if (code !== 0) problems.push(`expected exit 0, got ${code}`);
+    for (const name of [
+      "sess.spec.webm", "sess.grok.webm",
+      "log.spec.ndjson", "log.grok.ndjson",
+      "shot.spec.png", "shot.grok.png",
+    ]) {
+      const file = path.join(dir, name);
+      if (!existsSync(file)) problems.push(`missing artifact ${name}`);
+      else if (statSync(file).size === 0) problems.push(`artifact ${name} is empty`);
+    }
+    problems.length
+      ? fail("profile-artifacts-per-profile", problems)
+      : console.log("ok   profile-artifacts-per-profile (6 files, one video/log/shot per profile)");
+  } finally {
+    server.kill();
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Unit assertions for the checks 8-10 decision logic. Several branches (a
+ * browser-level popup block vs a sandbox-level one, a second instance that
+ * mounts but never handshakes) cannot be forced through a real browser
+ * reliably, so they are asserted directly against synthetic state.
+ */
+{
+  const { code, stdout, stderr } = await new Promise((resolve) => {
+    execFile(
+      process.execPath,
+      ["--import", "tsx", "test/checks-unit.ts"],
+      { timeout: 120_000 },
+      (err, stdout, stderr) => resolve({ code: err?.code ?? 0, stdout, stderr }),
+    );
+  });
+  const passed = (stdout.match(/^ok {3}unit:/gm) ?? []).length;
+  if (code !== 0 || passed === 0) {
+    fail("checks-unit", [
+      `unit suite exited ${code} with ${passed} assertion(s) passing`,
+      (stdout + stderr).split("\n").filter((l) => l.startsWith("FAIL") || l.startsWith("   -")).join("\n     ") ||
+        (stderr || stdout).slice(-400),
+    ]);
+  } else {
+    console.log(`ok   checks-unit (${passed} unit assertions)`);
+  }
 }
 
 console.log(failures ? `\n${failures} scenario(s) FAILED` : "\nall scenarios behaved as expected");

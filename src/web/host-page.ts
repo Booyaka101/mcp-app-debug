@@ -55,8 +55,12 @@ const CSS = `
   .chip .dot { width: 8px; height: 8px; border-radius: 50%; background: #d29922; }
   .chip.pass .dot { background: #3fb950; }
   .chip.fail .dot { background: #f85149; }
+  .chip.info .dot { background: #58a6ff; }
+  .chip.skip .dot { background: #6e7681; }
   .chip.pass { border-color: #3fb95055; }
   .chip.fail { border-color: #f8514955; }
+  .chip.info { border-color: #58a6ff55; }
+  .chip.skip { color: #8b949e; }
   main { flex: 1; display: grid; grid-template-columns: 1fr 460px; min-height: 0; }
   #appcard { padding: 16px; overflow: auto; display: flex; flex-direction: column; }
   #appcard .cardlabel { color: #8b949e; font-size: 11px; text-transform: uppercase;
@@ -93,10 +97,18 @@ const CSS = `
 const CHECK_TITLES: Array<[string, string]> = [
   ["resource-uri", "ui:// resource"],
   ["csp", "CSP"],
+  ["ui-domain", "ui.domain"],
   ["ui-initialize", "ui/initialize"],
   ["ui-ready", "ui/ready"],
   ["tool-call", "app tools/call"],
   ["protocol-revision", "protocol"],
+];
+
+/** Chips 8-10 exist only when a profile is active. */
+const PROFILE_CHECK_TITLES: Array<[string, string]> = [
+  ["tool-result-redelivery", "redelivery"],
+  ["multi-instance-isolation", "2 instances"],
+  ["external-navigation", "external nav"],
 ];
 
 function el(tag: string, attrs: Record<string, string> = {}, text?: string): HTMLElement {
@@ -121,10 +133,18 @@ function buildPanel(config: HarnessConfig): void {
   const badge = el("span", { class: `badge ${config.mode}` }, `mode: ${config.mode}`);
   if (config.modeNote) badge.title = config.modeNote;
   header.appendChild(badge);
+  if (config.profile) {
+    header.appendChild(
+      el("span", { class: "badge trusted" }, `profile: ${config.profile.name}`),
+    );
+  }
   document.body.appendChild(header);
 
   const checks = el("div", { id: "checks" });
-  for (const [id, label] of CHECK_TITLES) {
+  const chipList = config.profile
+    ? [...CHECK_TITLES, ...PROFILE_CHECK_TITLES]
+    : CHECK_TITLES;
+  for (const [id, label] of chipList) {
     const chip = el("div", { class: "chip", id: `chip-${id}`, title: "pending…" });
     chip.appendChild(el("span", { class: "dot" }));
     chip.appendChild(el("span", {}, label));
@@ -199,9 +219,11 @@ window.__setChecks = (checks) => {
   for (const c of checks) {
     const chip = document.getElementById(`chip-${c.id}`);
     if (!chip) continue;
-    chip.classList.toggle("pass", c.pass);
-    chip.classList.toggle("fail", !c.pass);
-    chip.title = c.detail;
+    const status = c.status ?? (c.pass ? "pass" : "fail");
+    for (const s of ["pass", "fail", "info", "skip"]) {
+      chip.classList.toggle(s, status === s);
+    }
+    chip.title = `${status.toUpperCase()} — ${c.detail}`;
   }
 };
 
@@ -225,8 +247,19 @@ class LoggingTransport implements Transport {
   sessionId?: string;
   setProtocolVersion?: (version: string) => void;
   private initId: unknown = null;
+  private toolResultsSent = 0;
 
-  constructor(private inner: PostMessageTransport) {}
+  constructor(
+    private inner: PostMessageTransport,
+    /** profile mode: which app instance this transport serves, and the OTHER
+     * instance's nonce so cross-instance leakage is detectable on the wire */
+    private profileCtx?: { instance: number; otherNonce: string },
+  ) {}
+
+  private tag(entry: LogEntry): LogEntry {
+    if (this.profileCtx) entry.instance = this.profileCtx.instance;
+    return entry;
+  }
 
   async start(): Promise<void> {
     this.inner.onclose = () => this.onclose?.();
@@ -250,7 +283,15 @@ class LoggingTransport implements Transport {
       } else if (m.method === "ui/notifications/initialized") {
         entry.marker = "ui-ready";
       }
-      log(entry);
+      log(this.tag(entry));
+      if (this.profileCtx && JSON.stringify(message).includes(this.profileCtx.otherNonce)) {
+        log(this.tag({
+          ts: now(), dir: "error", kind: "event", method: "cross-instance-leak",
+          payload: `frame on instance #${this.profileCtx.instance} carries instance #${this.profileCtx.instance === 1 ? 2 : 1}'s marker`,
+          marker: "cross-instance-leak",
+          data: { receivedOn: this.profileCtx.instance },
+        }));
+      }
       this.onmessage?.(message, extra);
     };
     await this.inner.start();
@@ -271,8 +312,13 @@ class LoggingTransport implements Transport {
     } else if (m.method === undefined && this.initId !== null && m.id === this.initId) {
       entry.marker = "ui-initialize-response";
       entry.method = "(ui/initialize response)";
+    } else if (this.profileCtx && m.method === "ui/notifications/tool-result") {
+      this.toolResultsSent++;
+      if (this.profileCtx.instance === 1) {
+        entry.marker = this.toolResultsSent === 1 ? "tool-result-delivered" : "second-tool-result";
+      }
     }
-    log(entry);
+    log(this.tag(entry));
     await this.inner.send(message);
   }
 
@@ -322,21 +368,9 @@ async function main(): Promise<void> {
   }
 
   // --- sandbox iframe (outer), served from a different origin
-  const iframe = document.createElement("iframe");
-  iframe.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms");
-  const allowAttr = buildAllowAttribute(config.resource.permissions as never);
-  if (allowAttr) iframe.setAttribute("allow", allowAttr);
-
-  const proxyReady = new Promise<void>((resolve) => {
-    const listener = ({ source, data }: MessageEvent) => {
-      if (source === iframe.contentWindow && data?.method === "ui/notifications/sandbox-proxy-ready") {
-        window.removeEventListener("message", listener);
-        log({ ts: now(), dir: "app→host", kind: "notif", method: "ui/notifications/sandbox-proxy-ready", payload: "{}" });
-        resolve();
-      }
-    };
-    window.addEventListener("message", listener);
-  });
+  const sandboxAttr = config.profile?.sandbox ?? "allow-scripts allow-same-origin allow-forms";
+  const iframe = createSandboxIframe(config, sandboxAttr);
+  const proxyReady = waitForProxyReady(iframe, 1);
 
   iframe.src = config.sandboxUrl;
   document.getElementById("frameholder")!.appendChild(iframe);
@@ -372,32 +406,7 @@ async function main(): Promise<void> {
     },
   );
 
-  if (config.mode === "trusted") {
-    // Manual proxy handlers — the Node side holds the real MCP client.
-    bridge.oncalltool = async (params) =>
-      await window.__mcpProxy("tools/call", params);
-    bridge.onlistresources = async (params) =>
-      await window.__mcpProxy("resources/list", params ?? {});
-    bridge.onreadresource = async (params) =>
-      await window.__mcpProxy("resources/read", params);
-    bridge.onlistresourcetemplates = async (params) =>
-      await window.__mcpProxy("resources/templates/list", params ?? {});
-    bridge.onlistprompts = async (params) =>
-      await window.__mcpProxy("prompts/list", params ?? {});
-    bridge.onmessage = async (params) => {
-      log({ ts: now(), dir: "event", kind: "event", method: "ui/message accepted", payload: truncatePayload(params) });
-      return {};
-    };
-    bridge.onopenlink = async (params) => {
-      log({ ts: now(), dir: "event", kind: "event", method: "ui/open-link (not opened by debug host)", payload: truncatePayload(params) });
-      return {};
-    };
-    bridge.onupdatemodelcontext = async (params) => {
-      log({ ts: now(), dir: "event", kind: "event", method: "model-context updated", payload: truncatePayload(params) });
-      return {};
-    };
-    bridge.onrequestdisplaymode = async (params) => ({ mode: params.mode });
-  }
+  if (config.mode === "trusted") registerProxyHandlers(bridge);
   // strict mode: no optional handlers registered, capabilities {} — app
   // requests beyond ping/ui/initialize get JSON-RPC errors, as with a
   // maximally restrictive host. The difference is visible in the
@@ -414,8 +423,10 @@ async function main(): Promise<void> {
     bridge.oninitialized = () => resolve();
   });
 
+  const profile = config.profile;
   const transport = new LoggingTransport(
     new PostMessageTransport(iframe.contentWindow!, iframe.contentWindow!),
+    profile ? { instance: 1, otherNonce: profile.instanceNonces[1] } : undefined,
   );
   await bridge.connect(transport);
 
@@ -424,6 +435,7 @@ async function main(): Promise<void> {
     html: config.resource.html,
     csp: config.resource.csp as never,
     permissions: config.resource.permissions as never,
+    ...(profile ? { sandbox: profile.sandbox } : {}),
   });
 
   await initialized;
@@ -436,9 +448,213 @@ async function main(): Promise<void> {
       name: config.toolName,
       arguments: config.toolArgs,
     });
-    await bridge.sendToolResult(result);
+    await bridge.sendToolResult(profile ? plantNonce(result, profile.instanceNonces[0]) : result);
   } catch (e) {
     await bridge.sendToolCancelled({ reason: e instanceof Error ? e.message : String(e) });
+  }
+
+  if (profile) {
+    runProfileExtras(config, bridge, capabilities).catch((e) => {
+      log({ ts: now(), dir: "error", kind: "event", method: "profile-extras-error", payload: truncatePayload(e instanceof Error ? e.stack ?? e.message : e) });
+    });
+  }
+}
+
+/* ------------------------------------------------ profile mode (checks 8-10) */
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Host-added _meta marker so cross-instance leakage is observable on the wire. */
+function plantNonce<T>(result: T, nonce: string): T {
+  const r = result as { _meta?: Record<string, unknown> };
+  r._meta = { ...(r._meta ?? {}), "com.mcp-app-debug/instance": nonce };
+  return result;
+}
+
+function createSandboxIframe(config: HarnessConfig, sandboxAttr: string): HTMLIFrameElement {
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("sandbox", sandboxAttr);
+  const allowAttr = buildAllowAttribute(config.resource.permissions as never);
+  if (allowAttr) iframe.setAttribute("allow", allowAttr);
+  return iframe;
+}
+
+function waitForProxyReady(iframe: HTMLIFrameElement, instance: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const listener = ({ source, data }: MessageEvent) => {
+      if (source === iframe.contentWindow && data?.method === "ui/notifications/sandbox-proxy-ready") {
+        window.removeEventListener("message", listener);
+        log({
+          ts: now(), dir: "app→host", kind: "notif",
+          method: "ui/notifications/sandbox-proxy-ready", payload: "{}",
+          ...(instance !== 1 ? { instance } : {}),
+        });
+        resolve();
+      }
+    };
+    window.addEventListener("message", listener);
+  });
+}
+
+/** Manual proxy handlers — the Node side holds the real MCP client. */
+function registerProxyHandlers(bridge: AppBridge): void {
+  bridge.oncalltool = async (params) =>
+    await window.__mcpProxy("tools/call", params);
+  bridge.onlistresources = async (params) =>
+    await window.__mcpProxy("resources/list", params ?? {});
+  bridge.onreadresource = async (params) =>
+    await window.__mcpProxy("resources/read", params);
+  bridge.onlistresourcetemplates = async (params) =>
+    await window.__mcpProxy("resources/templates/list", params ?? {});
+  bridge.onlistprompts = async (params) =>
+    await window.__mcpProxy("prompts/list", params ?? {});
+  bridge.onmessage = async (params) => {
+    log({ ts: now(), dir: "event", kind: "event", method: "ui/message accepted", payload: truncatePayload(params) });
+    return {};
+  };
+  bridge.onopenlink = async (params) => {
+    log({ ts: now(), dir: "event", kind: "event", method: "ui/open-link (not opened by debug host)", payload: truncatePayload(params) });
+    return {};
+  };
+  bridge.onupdatemodelcontext = async (params) => {
+    log({ ts: now(), dir: "event", kind: "event", method: "model-context updated", payload: truncatePayload(params) });
+    return {};
+  };
+  bridge.onrequestdisplaymode = async (params) => ({ mode: params.mode });
+}
+
+/** Checks 8 and 9: a second tools/call with varied arguments, and a second
+ * concurrent instance of the same view. Check 10 runs from Node (Playwright
+ * sees popups; this page cannot). */
+async function runProfileExtras(
+  config: HarnessConfig,
+  bridge: AppBridge,
+  capabilities: Record<string, unknown>,
+): Promise<void> {
+  const profile = config.profile!;
+
+  if (profile.mountSecondInstance) {
+    mountSecondInstance(config, capabilities).catch((e) => {
+      log({
+        ts: now(), dir: "error", kind: "event", method: "instance2-error",
+        payload: truncatePayload(e instanceof Error ? e.message : e),
+        marker: "instance2-skipped", instance: 2,
+      });
+    });
+  } else {
+    log({
+      ts: now(), dir: "event", kind: "event", method: "instance2-skipped",
+      payload: `profile ${profile.name} mounts at most 1 concurrent instance`,
+      marker: "instance2-skipped", instance: 2,
+    });
+  }
+
+  if (!profile.secondToolArgs) return;
+  // Give the app a beat to render state #1 before changing it.
+  await sleep(800);
+  log({
+    ts: now(), dir: "server", kind: "event", method: "tools/call (redelivery probe)",
+    payload: truncatePayload(profile.secondToolArgs), marker: "second-call-sent",
+  });
+  try {
+    const result2 = await window.__mcpProxy("tools/call:redelivery", {
+      name: config.toolName,
+      arguments: profile.secondToolArgs,
+    });
+    if (profile.redeliversToolResult) {
+      // Real hosts deliver error results too — check 8 judges isError itself.
+      await bridge.sendToolResult(plantNonce(result2, profile.instanceNonces[0]));
+    } else {
+      log({
+        ts: now(), dir: "event", kind: "event", method: "second-tool-result-withheld",
+        payload: `profile ${profile.name}: redeliversToolResult=false — tool-result #2 not delivered (ext-apps#750 symptom 1)`,
+        marker: "second-tool-result-withheld",
+      });
+    }
+  } catch {
+    // the Node proxy already recorded the failure in state.secondCall
+  }
+}
+
+async function mountSecondInstance(
+  config: HarnessConfig,
+  capabilities: Record<string, unknown>,
+): Promise<void> {
+  const profile = config.profile!;
+
+  // Fresh resources/read — a singleton ui:// resource surfaces here.
+  let html2: string | null = null;
+  let readError: string | undefined;
+  try {
+    const r = (await window.__mcpProxy("resources/read", { uri: config.resource.uri })) as {
+      contents?: Array<{ text?: unknown; blob?: unknown }>;
+    };
+    const c = r?.contents?.[0];
+    html2 =
+      typeof c?.text === "string" ? c.text
+      : typeof c?.blob === "string" ? atob(c.blob)
+      : null;
+    if (html2 === null) readError = "second resources/read returned no text/blob content (singleton ui:// resource)";
+  } catch (e) {
+    readError = `second resources/read failed (singleton ui:// resource): ${e instanceof Error ? e.message : e}`;
+  }
+  if (html2 === null) {
+    log({
+      ts: now(), dir: "event", kind: "event", method: "instance2-skipped",
+      payload: readError, marker: "instance2-skipped", instance: 2,
+    });
+    return;
+  }
+
+  const iframe2 = createSandboxIframe(config, profile.sandbox);
+  const proxyReady2 = waitForProxyReady(iframe2, 2);
+  iframe2.src = config.sandboxUrl;
+  document.getElementById("frameholder")!.appendChild(iframe2);
+  await proxyReady2;
+
+  const bridge2 = new AppBridge(
+    null,
+    { name: "mcp-app-debug", version: __APP_VERSION__ },
+    capabilities,
+    {
+      hostContext: {
+        theme: "light",
+        platform: "web",
+        displayMode: "inline",
+        availableDisplayModes: ["inline"],
+        containerDimensions: { maxHeight: 4000 },
+        locale: navigator.language,
+      },
+    },
+  );
+  if (config.mode === "trusted") registerProxyHandlers(bridge2);
+  bridge2.onsizechange = ({ height }) => {
+    if (height !== undefined) iframe2.style.height = `${Math.min(height, 4000)}px`;
+  };
+  const initialized2 = new Promise<void>((resolve) => {
+    bridge2.oninitialized = () => resolve();
+  });
+  const transport2 = new LoggingTransport(
+    new PostMessageTransport(iframe2.contentWindow!, iframe2.contentWindow!),
+    { instance: 2, otherNonce: profile.instanceNonces[0] },
+  );
+  await bridge2.connect(transport2);
+  await bridge2.sendSandboxResourceReady({
+    html: html2,
+    csp: config.resource.csp as never,
+    permissions: config.resource.permissions as never,
+    sandbox: profile.sandbox,
+  });
+  await initialized2;
+  await bridge2.sendToolInput({ arguments: config.toolArgs });
+  try {
+    const result = await window.__mcpProxy("tools/call:instance2", {
+      name: config.toolName,
+      arguments: config.toolArgs,
+    });
+    await bridge2.sendToolResult(plantNonce(result, profile.instanceNonces[1]));
+  } catch (e) {
+    await bridge2.sendToolCancelled({ reason: e instanceof Error ? e.message : String(e) });
   }
 }
 

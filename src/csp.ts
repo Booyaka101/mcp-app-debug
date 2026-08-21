@@ -21,15 +21,33 @@ function sanitizeCspDomains(domains?: string[]): string[] {
   return domains.filter((d) => typeof d === "string" && !/[;\r\n'" ]/.test(d));
 }
 
-export function buildCspHeader(csp?: ResourceCsp): string {
+/** Base directives from an active profile descriptor (src/profiles/). */
+export interface CspBase {
+  frameAncestors: string;
+  scriptSrc: string;
+  defaultSrc: string;
+  objectSrc: string;
+}
+
+/**
+ * Without `base` this is the 0.5.0 header verbatim. With a profile's `base`,
+ * the varied directives (default-src, script-src, object-src, frame-ancestors)
+ * come from the descriptor; the rest is unchanged. A descriptor's
+ * `frameAncestors: "'self'"` means "the host's own origin" — in this harness
+ * that is the host page's origin (`hostOrigin`), not the sandbox's.
+ */
+export function buildCspHeader(csp?: ResourceCsp, base?: CspBase, hostOrigin?: string): string {
   const resourceDomains = sanitizeCspDomains(csp?.resourceDomains).join(" ");
   const connectDomains = sanitizeCspDomains(csp?.connectDomains).join(" ");
   const frameDomains = sanitizeCspDomains(csp?.frameDomains).join(" ") || null;
   const baseUriDomains = sanitizeCspDomains(csp?.baseUriDomains).join(" ") || null;
 
   const directives = [
-    "default-src 'self' 'unsafe-inline'",
-    `script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: ${resourceDomains}`.trim(),
+    base ? `default-src ${base.defaultSrc}` : "default-src 'self' 'unsafe-inline'",
+    (base
+      ? `script-src ${base.scriptSrc} ${resourceDomains}`
+      : `script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: data: ${resourceDomains}`
+    ).trim(),
     `style-src 'self' 'unsafe-inline' blob: data: ${resourceDomains}`.trim(),
     `img-src 'self' data: blob: ${resourceDomains}`.trim(),
     `font-src 'self' data: blob: ${resourceDomains}`.trim(),
@@ -37,9 +55,14 @@ export function buildCspHeader(csp?: ResourceCsp): string {
     `connect-src 'self' ${connectDomains}`.trim(),
     `worker-src 'self' blob: ${resourceDomains}`.trim(),
     frameDomains ? `frame-src ${frameDomains}` : "frame-src 'none'",
-    "object-src 'none'",
+    base ? `object-src ${base.objectSrc}` : "object-src 'none'",
     baseUriDomains ? `base-uri ${baseUriDomains}` : "base-uri 'none'",
   ];
+  if (base) {
+    directives.push(
+      `frame-ancestors ${base.frameAncestors === "'self'" && hostOrigin ? hostOrigin : base.frameAncestors}`,
+    );
+  }
 
   return directives.join("; ");
 }

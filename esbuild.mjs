@@ -42,4 +42,8 @@ for (const [entry, outfile] of [
 
 await cp("src/web/host-page.html", "dist/web/host-page.html");
 await cp("src/web/sandbox.html", "dist/web/sandbox.html");
+// Profile descriptors are read at runtime relative to dist/cli.js.
+for (const name of ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"]) {
+  await cp(`src/profiles/${name}.json`, `dist/profiles/${name}.json`);
+}
 console.log("build complete");

@@ -1,0 +1,19 @@
+{
+  "name": "chatgpt",
+  "description": "Community-observed ChatGPT knobs, not vendor documentation. Mirrors spec except that the Claude-scheme _meta.ui.domain is not modelled as enforced: ext-apps#750 and #671 report the same spec-shaped resources rendering on ChatGPT while the domain format is documented as host-specific.",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": {
+    "frameAncestors": "'self'",
+    "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+    "defaultSrc": "'self' 'unsafe-inline'",
+    "objectSrc": "'self' 'unsafe-inline'"
+  },
+  "popupsAllowed": false,
+  "redeliversToolResult": true,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": false,
+  "sources": [
+    "https://github.com/modelcontextprotocol/ext-apps/issues/750",
+    "https://github.com/modelcontextprotocol/ext-apps/issues/671"
+  ]
+}
