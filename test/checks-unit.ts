@@ -10,7 +10,7 @@
  *
  * Run: npx tsx test/checks-unit.ts   (also runs as part of `npm test`)
  */
-import { evaluateProfileChecks, statusOf } from "../src/checks.js";
+import { evaluateChecks, evaluateProfileChecks, statusOf } from "../src/checks.js";
 import type { ProfileDescriptor } from "../src/profiles/index.js";
 import type { CheckResult, HarnessState } from "../src/types.js";
 
@@ -42,16 +42,14 @@ const baseState = (): HarnessState => ({
 
 let failures = 0;
 
-function check(
+function assertCheck(
   name: string,
-  state: Partial<HarnessState>,
+  results: CheckResult[],
   id: CheckResult["id"],
   expectStatus: string,
   expectSubstring: string,
-  profile: ProfileDescriptor = PROFILE,
 ): void {
-  const merged = { ...baseState(), ...state } as HarnessState;
-  const result = evaluateProfileChecks(merged, profile, 10).find((c) => c.id === id);
+  const result = results.find((c) => c.id === id);
   const problems: string[] = [];
   if (!result) {
     problems.push(`no check "${id}" produced`);
@@ -72,6 +70,47 @@ function check(
     console.log(`ok   unit: ${name}`);
   }
 }
+
+/** Assert on checks 8-10, which need a profile descriptor and a window. */
+function check(
+  name: string,
+  state: Partial<HarnessState>,
+  id: CheckResult["id"],
+  expectStatus: string,
+  expectSubstring: string,
+  profile: ProfileDescriptor = PROFILE,
+): void {
+  const merged = { ...baseState(), ...state } as HarnessState;
+  assertCheck(name, evaluateProfileChecks(merged, profile, 10), id, expectStatus, expectSubstring);
+}
+
+/** Assert on the seven core checks, which run on every target. */
+function coreCheck(
+  name: string,
+  state: Partial<HarnessState>,
+  id: CheckResult["id"],
+  expectStatus: string,
+  expectSubstring: string,
+): void {
+  const merged = { ...baseState(), ...state } as HarnessState;
+  assertCheck(name, evaluateChecks(merged), id, expectStatus, expectSubstring);
+}
+
+/* ----------------------------------------------- d ui/initialize handshake */
+
+// ext-apps#671: a view that fires ui/notifications/initialized without awaiting
+// the reply sails through a rejection, so every later check still looks healthy.
+// The reply arriving is not the same as the handshake succeeding.
+coreCheck("d fail when the host rejected ui/initialize",
+  {
+    htmlInjectedAt: 100, uiInitializeAt: 150, uiInitializeRespondedAt: 200,
+    uiInitializeError: "-32603: invalid_type at params.appInfo",
+  },
+  "ui-initialize", "fail", "REJECTED the app's ui/initialize (-32603: invalid_type at params.appInfo)");
+
+coreCheck("d pass on a clean handshake inside the deadline",
+  { htmlInjectedAt: 100, uiInitializeAt: 150, uiInitializeRespondedAt: 200 },
+  "ui-initialize", "pass", "handshake completed in 100 ms");
 
 /* ------------------------------------------- 8 tool-result redelivery */
 
@@ -130,6 +169,10 @@ check("9 fail names the direction and count of the leak",
 check("9 fail also catches the reverse direction",
   { instance2: { mountedAt: 200, uiInitializeRespondedAt: 220, leaksOn1: 2, leaksOn2: 0 } },
   "multi-instance-isolation", "fail", "instance #1 received 2 message(s) addressed to instance #2");
+
+check("9 fail when instance #2's ui/initialize was rejected",
+  { instance2: { mountedAt: 200, uiInitializeRespondedAt: 220, uiInitializeError: "-32603: bad params", leaksOn1: 0, leaksOn2: 0 } },
+  "multi-instance-isolation", "fail", "instance #2's ui/initialize was REJECTED (-32603: bad params)");
 
 check("9 pass on two clean isolated handshakes",
   { instance2: { mountedAt: 200, uiInitializeRespondedAt: 220, leaksOn1: 0, leaksOn2: 0 } },

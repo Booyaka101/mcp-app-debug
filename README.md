@@ -78,7 +78,11 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
    you sent is the hash of a near-miss endpoint spelling (a stray trailing
    slash, a missing `/mcp`, the wrong scheme), the check names which one.
 4. **ui/initialize handshake** — your app's `ui/initialize` request is answered
-   within 3 s of HTML injection.
+   *successfully* within 3 s of HTML injection. A JSON-RPC error reply is a FAIL
+   naming the rejected field: `appInfo` and `appCapabilities` are both required
+   in the params, and an app that fires `ui/notifications/initialized` without
+   awaiting the reply runs on through a rejection, so checks 5 and 6 can still
+   look healthy while a real client has no connected app.
 5. **ui/ready notification** — `ui/notifications/initialized` (the "ui/ready"
    signal) arrives within 5 s.
 6. **app-initiated tools/call** — at least one `tools/call` *initiated by your
@@ -280,7 +284,8 @@ the wire into 7 checks, each **PASS / FAIL / INCONCLUSIVE — never a guess**:
    and this fails, the host most likely dropped the
    `text/html;profile=mcp-app` mimeType or refused to mount the iframe.
 4. **ui-initialize-answered** — the host answered the app's `ui/initialize`
-   (self-reported, with latency).
+   with a result (self-reported, with latency). An error reply is a FAIL naming
+   the code and message, not an answer.
 5. **tool-result-meta-preserved** — the planted `_meta.ui.probeToken` (a
    random hex string minted per run) reached the app inside the `tool-result`
    payload. FAIL is the `_map_mcp_tool_result` defect.

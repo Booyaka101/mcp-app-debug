@@ -311,7 +311,16 @@ class LoggingTransport implements Transport {
       entry.marker = "html-injected";
     } else if (m.method === undefined && this.initId !== null && m.id === this.initId) {
       entry.marker = "ui-initialize-response";
-      entry.method = "(ui/initialize response)";
+      // An app that fires ui/notifications/initialized without awaiting this
+      // reply carries on through a rejection, so the error has to be carried
+      // to the checks or the run reads as a clean handshake.
+      const err = m.error as { code?: number; message?: string } | undefined;
+      if (err) {
+        entry.method = "(ui/initialize REJECTED)";
+        entry.data = { code: err.code, message: err.message };
+      } else {
+        entry.method = "(ui/initialize response)";
+      }
     } else if (this.profileCtx && m.method === "ui/notifications/tool-result") {
       this.toolResultsSent++;
       if (this.profileCtx.instance === 1) {

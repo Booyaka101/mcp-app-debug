@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+**A rejected `ui/initialize` is no longer a PASS.**
+
+Reported by @itsjet26 in
+[ext-apps#671](https://github.com/modelcontextprotocol/ext-apps/issues/671):
+a 7/7 run could conceal the app's very first message being refused. Check 4
+matched the reply to the request by id and stopped there, so a JSON-RPC error
+counted as a completed handshake. An app that fires
+`ui/notifications/initialized` without awaiting the reply carries on through
+the rejection, so checks 5 and 6 still passed and the summary line said the
+app was healthy when a real client had nothing connected.
+
+- Check 4 (`ui/initialize handshake`) now FAILs on an error reply and names the
+  rejected field, e.g. `-32603: invalid_type at params.appInfo`. Schema-issue
+  arrays are reduced to their paths; the raw frame stays in the protocol log.
+- Host-conformance check 4 (`ui-initialize-answered`) had the same hole from
+  the other side — the probe app treated any reply as an answer. It now
+  separates a result from an error.
+- Check 9 (`multi-instance isolation`, `--profile`) FAILs rather than judging
+  isolation when instance #2's handshake was rejected.
+- New scenario `bad-init-params` covers this end to end: `ui/initialize`
+  without `appInfo`, sent fire-and-forget. The regression it guards is the
+  *mustPass* list — ready and `tools/call` still go green.
+
 ## 0.6.0 — 2026-08-21
 
 **Host profiles: separate app fault from host fault.**

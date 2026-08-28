@@ -139,8 +139,17 @@
             state.uiInitializeAnswered = true;
             state.uiInitializeLatencyMs = Math.round(performance.now() - t0);
             const resp = await answer;
+            // A rejection is an answer on the wire but not a handshake; the
+            // fixture has to see the difference or it grades an error as PASS.
+            if (resp.error) {
+              const msg = String(resp.error.message ?? "no message").replace(/\s+/g, " ");
+              state.uiInitializeError =
+                (resp.error.code ?? "error") + ": " + (msg.length > 160 ? msg.slice(0, 157) + "..." : msg);
+              fact("ui/initialize", "REJECTED — " + state.uiInitializeError);
+            } else {
+              fact("ui/initialize", "answered in " + state.uiInitializeLatencyMs + " ms");
+            }
             state.hostInfo = (resp.result && resp.result.hostInfo) || null;
-            fact("ui/initialize", "answered in " + state.uiInitializeLatencyMs + " ms");
             post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
             status("initialized — waiting for the tool-result…");
             await Promise.race([toolResultWait, sleep(8000)]); // = APP_TOOL_RESULT_WAIT_MS

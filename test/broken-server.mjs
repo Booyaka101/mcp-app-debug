@@ -14,6 +14,8 @@
  *   bad-mime   resource served as text/html instead of the MCP App profile → fails (a)
  *   no-ready   HTML never speaks the App Bridge protocol                   → fails (c)(d)(e)
  *   slow-init  app waits 4s before ui/initialize (deadline 3s)             → fails (c)
+ *   bad-init-params  ui/initialize omits appInfo and the app never awaits the
+ *                    reply, so it sails past the rejection                 → fails (d) only
  *   tool-error every tools/call returns isError:true                       → fails (e)
  *   csp-meta   HTML carries <meta CSP> with frame-ancestors 'none'         → fails (b)
  *   ext-img    HTML loads an external image not declared in _meta.ui.csp   → fails (b)
@@ -36,7 +38,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 
-const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "tool-error", "csp-meta", "ext-img", "bad-domain"];
+const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "bad-init-params", "tool-error", "csp-meta", "ext-img", "bad-domain"];
 const STATELESS_SCENARIOS = ["ok", "bad-uri", "no-ready", "tool-error", "discover-missing", "no-ui-extension"];
 const stdioMode = process.argv.includes("--stdio");
 const statelessMode = process.argv.includes("--stateless");
@@ -55,7 +57,14 @@ function claudeDomain(url) {
 }
 
 /** Minimal hand-rolled MCP App (no SDK): handshake + optional auto tools/call. */
-function appHtml({ delayMs = 0, autoCallTool = null, head = "", body = "" } = {}) {
+function appHtml({
+  delayMs = 0,
+  autoCallTool = null,
+  head = "",
+  body = "",
+  initParams = { protocolVersion: "2026-01-26", appInfo: { name: "broken-app", version: "1.0.0" }, appCapabilities: {} },
+  awaitInit = true,
+} = {}) {
   return `<!doctype html>
 <html><head><meta charset="utf-8">${head}</head>
 <body><h3 style="font-family:sans-serif">broken-server app (${scenario})</h3>${body}
@@ -76,11 +85,8 @@ function appHtml({ delayMs = 0, autoCallTool = null, head = "", body = "" } = {}
     post({ jsonrpc: "2.0", id, method, params });
   });
   setTimeout(async () => {
-    await request("ui/initialize", {
-      protocolVersion: "2026-01-26",
-      appInfo: { name: "broken-app", version: "1.0.0" },
-      appCapabilities: {},
-    });
+    const init = request("ui/initialize", ${JSON.stringify(initParams)});
+    ${awaitInit ? "await init;" : "// fire-and-forget: the app never looks at the reply"}
     post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
     ${autoCallTool ? `await request("tools/call", { name: ${JSON.stringify(autoCallTool)}, arguments: {} });` : ""}
   }, ${delayMs});
@@ -123,6 +129,15 @@ function buildServer() {
       html = appHtml({
         autoCallTool: "poke",
         head: `<meta http-equiv="Content-Security-Policy" content="frame-ancestors 'none'">`,
+      });
+      break;
+    case "bad-init-params":
+      // ext-apps#671: ui/initialize omits the required appInfo and the app
+      // never awaits the reply, so it runs on through the rejection.
+      html = appHtml({
+        autoCallTool: "poke",
+        initParams: { protocolVersion: "2026-01-26", appCapabilities: {} },
+        awaitInit: false,
       });
       break;
     case "ext-img":

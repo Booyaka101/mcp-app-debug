@@ -113,6 +113,13 @@ export function evaluateChecks(state: HarnessState, profile?: ProfileDescriptor)
           ? "ui/initialize request seen but no response completed"
           : `no ui/initialize request from the app within ${UI_INITIALIZE_DEADLINE_MS} ms — ` +
             "the app never connected (check for JS errors in the log; is the App Bridge bundled?)";
+    } else if (state.uiInitializeError !== undefined) {
+      ms = state.uiInitializeRespondedAt - state.htmlInjectedAt;
+      detail =
+        `the host REJECTED the app's ui/initialize (${state.uiInitializeError}) — ` +
+        "appInfo and appCapabilities are both required in the params. An app that sends " +
+        "ui/notifications/initialized without awaiting this reply runs on regardless, so " +
+        "the later checks can still look healthy while a real client has no connected app.";
     } else {
       ms = state.uiInitializeRespondedAt - state.htmlInjectedAt;
       pass = ms <= UI_INITIALIZE_DEADLINE_MS;
@@ -266,6 +273,10 @@ export function evaluateProfileChecks(
           ? "instance #2 was never injected into a sandbox (earlier failure)"
           : `instance #2 never completed the ui/initialize handshake (${windowSec.toFixed(1)}s) — ` +
             "the view cannot be mounted twice in one page");
+    } else if (i2.uiInitializeError !== undefined) {
+      push("multi-instance-isolation", "multi-instance isolation", "fail",
+        `instance #2's ui/initialize was REJECTED (${i2.uiInitializeError}) — ` +
+        "isolation cannot be judged because the second instance never connected");
     } else if (i2.leaksOn1 + i2.leaksOn2 > 0) {
       const parts: string[] = [];
       if (i2.leaksOn2 > 0) parts.push(`instance #2 received ${i2.leaksOn2} message(s) addressed to instance #1`);

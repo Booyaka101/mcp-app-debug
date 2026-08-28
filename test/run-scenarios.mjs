@@ -24,6 +24,13 @@ const EXPECTATIONS = {
   "bad-mime": { mustFail: ["resource-uri"], mustPass: ["protocol-revision"] },
   "no-ready": { mustFail: ["ui-initialize", "ui-ready", "tool-call"], mustPass: ["resource-uri", "protocol-revision"] },
   "slow-init": { mustFail: ["ui-initialize"], mustPass: ["ui-ready", "resource-uri", "protocol-revision"] },
+  // The point of this one is the mustPass list: ready and tools/call still look
+  // healthy, which is exactly why a rejected handshake used to slip through.
+  "bad-init-params": {
+    mustFail: ["ui-initialize"],
+    mustPass: ["resource-uri", "csp", "ui-ready", "tool-call", "protocol-revision"],
+    detailContains: { "ui-initialize": "REJECTED the app's ui/initialize" },
+  },
   "tool-error": { mustFail: ["tool-call"], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "protocol-revision"] },
   "csp-meta": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
   "ext-img": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
@@ -241,6 +248,8 @@ await extraCase(
  *   host-drop         fake-host --drop (no capabilities.extensions, tool-result
  *                     _meta stripped) → client-advertises-ui and
  *                     tool-result-meta-preserved FAIL, exit 1
+ *   host-reject-init  fake-host --reject-init (ui/initialize answered with a
+ *                     JSON-RPC error) → ui-initialize-answered FAIL, exit 1
  *   host-no-client    nothing connects → exit 2, "no client connected", no JSON
  *   host-list-only    fake-host --list-only (never calls probe) → chip 1 PASS,
  *                     chips 2-7 INCONCLUSIVE, exit 0
@@ -365,6 +374,20 @@ await hostCase("host-drop", {
       "client-advertises-ui": "pydantic-ai#6613 shape",
       "tool-result-meta-preserved": "the host dropped tool-result _meta",
     },
+  },
+});
+
+// ext-apps#671: an error reply is a reply. Everything else here is conformant,
+// so only check 4 may move.
+await hostCase("host-reject-init", {
+  port: 3315,
+  windowSec: 60,
+  clientArgs: ["test/fake-host.mjs", "http://localhost:3315/mcp", "--reject-init"],
+  expect: {
+    exit: 1,
+    verdicts: { ...ALL_PASS, "ui-initialize-answered": "fail" },
+    counts: [6, 1, 0],
+    detailContains: { "ui-initialize-answered": "REJECTED the app's ui/initialize (-32603: app rejected by this host)" },
   },
 });
 

@@ -78,6 +78,8 @@ function recordBeacon(fx: Fixture, via: ProbeBeacon["via"], raw: unknown): void 
       typeof p.uiInitializeAnswered === "boolean" ? p.uiInitializeAnswered : undefined,
     uiInitializeLatencyMs:
       typeof p.uiInitializeLatencyMs === "number" ? p.uiInitializeLatencyMs : undefined,
+    uiInitializeError:
+      typeof p.uiInitializeError === "string" ? p.uiInitializeError : undefined,
     hostInfo: p.hostInfo,
     sawToolInput: typeof p.sawToolInput === "boolean" ? p.sawToolInput : undefined,
     sawToolResult: typeof p.sawToolResult === "boolean" ? p.sawToolResult : undefined,

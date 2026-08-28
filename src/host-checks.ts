@@ -169,7 +169,14 @@ export function evaluateHostChecks(obs: HostObservations, final: boolean): HostC
   {
     const base = { id: "ui-initialize-answered" as const, title: "ui/initialize answered" };
     const b = latestBeaconWith(obs.beacons, "uiInitializeAnswered");
-    if (b?.uiInitializeAnswered === true) {
+    if (b?.uiInitializeAnswered === true && b.uiInitializeError !== undefined) {
+      checks.push({
+        ...make(base, "fail"),
+        detail:
+          `the host REJECTED the app's ui/initialize (${b.uiInitializeError}) — ` +
+          "the app is never connected, so anything it renders afterwards is unbridged",
+      });
+    } else if (b?.uiInitializeAnswered === true) {
       const ms = typeof b.uiInitializeLatencyMs === "number" ? b.uiInitializeLatencyMs : undefined;
       checks.push({
         ...make(base, "pass"),

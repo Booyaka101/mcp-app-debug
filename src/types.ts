@@ -146,6 +146,8 @@ export interface HarnessState {
   htmlInjectedAt?: number;
   uiInitializeAt?: number;
   uiInitializeRespondedAt?: number;
+  /** set when the reply to ui/initialize was a JSON-RPC error, as "<code>: <message>" */
+  uiInitializeError?: string;
   uiReadyAt?: number;
   appToolCalls: Array<{ name: string; isError: boolean; at: number }>;
   /** tools/call requests seen on the wire from the app (even if the host rejected them) */
@@ -175,6 +177,7 @@ export interface HarnessState {
     skipped?: string;
     mountedAt?: number;
     uiInitializeRespondedAt?: number;
+    uiInitializeError?: string;
     readyAt?: number;
     /** frames observed on instance 1 carrying instance 2's marker, and vice versa */
     leaksOn1: number;
@@ -211,6 +214,8 @@ export interface ProbeBeacon {
   topAccessible?: boolean;
   uiInitializeAnswered?: boolean;
   uiInitializeLatencyMs?: number;
+  /** set when the host answered ui/initialize with a JSON-RPC error, as "<code>: <message>" */
+  uiInitializeError?: string;
   hostInfo?: unknown;
   sawToolInput?: boolean;
   sawToolResult?: boolean;
