@@ -234,6 +234,12 @@ export interface HostObservations {
   clientInfo?: { name?: string; version?: string };
   /** params.capabilities from a 2025-11-25 initialize request */
   initCapabilities?: Record<string, unknown>;
+  /** params.protocolVersion the client asked for in its initialize body */
+  initProtocolVersion?: string;
+  /** the MCP-Protocol-Version HTTP header, which can disagree with the body */
+  headerProtocolVersion?: string;
+  /** the header/body disagreement has already been logged */
+  protocolSplitLogged?: boolean;
   /** io.modelcontextprotocol/clientCapabilities from any request's _meta
    * envelope (the 2026-07-28 path) */
   envelopeCapabilities?: Record<string, unknown>;
@@ -279,6 +285,29 @@ export interface HostReport {
 }
 
 export const TRUNCATE_LEN = 200;
+
+/**
+ * One-line summary of a JSON-RPC error for a check detail. Schema validators
+ * answer with a pretty-printed issue array, which is unreadable in a report,
+ * so reduce it to the offending paths and leave the raw frame in the log.
+ */
+export function summarizeRpcError(code: number | undefined, message: string | undefined): string {
+  const head = code ?? "error";
+  const raw = (message ?? "no message").trim();
+  const start = raw.indexOf("[");
+  if (start !== -1) {
+    try {
+      const issues = JSON.parse(raw.slice(start)) as Array<{ code?: string; path?: unknown[] }>;
+      const paths = issues
+        .filter((i) => Array.isArray(i.path) && i.path.length > 0)
+        .map((i) => `${i.code ?? "invalid"} at ${i.path!.join(".")}`);
+      if (paths.length) return `${head}: ${paths.join("; ")}`;
+    } catch {
+      // not a validator issue array — fall through to the flattened message
+    }
+  }
+  return `${head}: ${truncatePayload(raw.replace(/\s+/g, " "))}`;
+}
 
 export function truncatePayload(value: unknown): string {
   let s: string;

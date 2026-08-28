@@ -26,6 +26,15 @@ what never happened:
 
 ![handshake timeout diagnosed](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/demo-fail.gif)
 
+The nastier variant is a handshake that gets an answer and still fails. Here
+the app renders, `ui/ready` fires, and its `tools/call` round-trips, so six
+chips are green. The one red chip is `ui/initialize`, because the host
+answered it with an error: the app never sent `appInfo`, and it never looked
+at the reply, so it carried on as if connected. In a real client this is an
+app that draws itself and does nothing.
+
+![a rejected ui/initialize among six passing checks](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/handshake-rejected.png)
+
 ## Run it
 
 ```bash
@@ -260,6 +269,15 @@ sandbox security policies, and the `extensions` capability field dropped so
 `io.modelcontextprotocol/ui` support can never be advertised. The reporter had
 to derive all of that by hand; this mode prints the verdict in one run.
 
+Use it as a **control** when your own server renders everywhere except one
+host. The fixture is a server you did not write and whose conformance is
+asserted by this repo's own suite, so pointing the suspect host at it
+separates the two explanations that otherwise look identical from the server
+side. If the fixture's app renders, the host works and the difference is in
+your server. If it does not, you have a reproduction that no longer depends on
+your code, and check 2 answers the question the server side cannot see at all:
+whether the host ever issued `resources/read`.
+
 ```bash
 npx mcp-app-debug host              # fixture serves http://localhost:3111/mcp
 npx mcp-app-debug host --json       # CI verdict as one JSON object
@@ -295,6 +313,12 @@ the wire into 7 checks, each **PASS / FAIL / INCONCLUSIVE — never a guess**:
    INCONCLUSIVE, never FAIL.
 7. **sandbox-origin-and-csp** — the app runs on a distinct sandbox origin
    (`window.top` unreachable) and no `securitypolicyviolation` fired.
+
+The log also calls out one thing that is not a check, because it is a trap
+rather than a defect: when the `MCP-Protocol-Version` HTTP header and the
+`initialize` body name different revisions, the fixture says so. Claude does
+exactly this (header `2026-07-28`, body `2025-11-25`), so a server that logs
+only one of the two concludes the wrong thing about what was negotiated.
 
 A host that drops `capabilities.extensions` and strips tool-result `_meta`
 (reproduce it with `node test/fake-host.mjs <url> --drop`) gets:

@@ -142,10 +142,13 @@
             // A rejection is an answer on the wire but not a handshake; the
             // fixture has to see the difference or it grades an error as PASS.
             if (resp.error) {
-              const msg = String(resp.error.message ?? "no message").replace(/\s+/g, " ");
-              state.uiInitializeError =
-                (resp.error.code ?? "error") + ": " + (msg.length > 160 ? msg.slice(0, 157) + "..." : msg);
-              fact("ui/initialize", "REJECTED — " + state.uiInitializeError);
+              // Raw code/message; the fixture formats it, so both directions
+              // read the same in a report.
+              state.uiInitializeError = { code: resp.error.code, message: resp.error.message };
+              fact(
+                "ui/initialize",
+                "REJECTED, " + (resp.error.code ?? "error") + ": " + (resp.error.message ?? "no message"),
+              );
             } else {
               fact("ui/initialize", "answered in " + state.uiInitializeLatencyMs + " ms");
             }

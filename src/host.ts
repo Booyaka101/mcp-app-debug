@@ -26,7 +26,7 @@ import {
   type ServerConnection,
 } from "./mcp.js";
 import type { CheckReport, CheckResult, HarnessConfig, HarnessState, LogEntry } from "./types.js";
-import { truncatePayload } from "./types.js";
+import { summarizeRpcError, truncatePayload } from "./types.js";
 
 export interface HostOptions {
   connect: ConnectTarget;
@@ -64,30 +64,6 @@ const DIR_FMT: Record<string, (s: string) => string> = {
 const DIR_ARROW: Record<string, string> = {
   "host→app": "->", "app→host": "<-", server: "*", event: ".", error: "x",
 };
-
-/**
- * One-line summary of a JSON-RPC error for a check detail. Schema validators
- * answer with a pretty-printed issue array, which is unreadable in a report —
- * reduce it to the offending paths and keep the raw frame for the log.
- */
-function summarizeRpcError(code: number | undefined, message: string | undefined): string {
-  const head = code ?? "error";
-  const raw = (message ?? "no message").trim();
-  const start = raw.indexOf("[");
-  if (start !== -1) {
-    try {
-      const issues = JSON.parse(raw.slice(start)) as Array<{ code?: string; path?: unknown[] }>;
-      const paths = issues
-        .filter((i) => Array.isArray(i.path) && i.path.length > 0)
-        .map((i) => `${i.code ?? "invalid"} at ${i.path!.join(".")}`);
-      if (paths.length) return `${head}: ${paths.join("; ")}`;
-    } catch {
-      // not a validator issue array — fall through to the flattened message
-    }
-  }
-  const flat = raw.replace(/\s+/g, " ");
-  return `${head}: ${flat.length > 160 ? `${flat.slice(0, 157)}...` : flat}`;
-}
 
 function printEntry(entry: LogEntry): void {
   const fmt = DIR_FMT[entry.dir] ?? ((s: string) => s);
