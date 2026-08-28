@@ -13,8 +13,11 @@
  *              tool-result _meta stripped before it reaches the app.
  *              Everything else stays conformant.
  * --list-only  connects and lists tools but never calls `probe`.
+ * --reject-init answers ui/initialize with a JSON-RPC error instead of a result.
+ *              Everything else stays conformant, so it catches a fixture that
+ *              grades "a reply arrived" rather than "the handshake succeeded".
  *
- * Usage: node test/fake-host.mjs <fixture-url> [--drop|--list-only]
+ * Usage: node test/fake-host.mjs <fixture-url> [--drop|--list-only|--reject-init]
  */
 import { readFile } from "node:fs/promises";
 import http from "node:http";
@@ -25,9 +28,10 @@ import { chromium } from "playwright";
 const args = process.argv.slice(2);
 const drop = args.includes("--drop");
 const listOnly = args.includes("--list-only");
+const rejectInit = args.includes("--reject-init");
 const url = args.find((a) => !a.startsWith("--"));
 if (!url) {
-  console.error("usage: node test/fake-host.mjs <fixture-url> [--drop|--list-only]");
+  console.error("usage: node test/fake-host.mjs <fixture-url> [--drop|--list-only|--reject-init]");
   process.exit(2);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -120,6 +124,7 @@ const cfg = {
   csp: uiMeta.csp,
   permissions: uiMeta.permissions,
   toolResult,
+  rejectInit,
 };
 const hostPageHtml = `<!doctype html><html><head><meta charset="utf-8"><title>fake-host</title></head>
 <body><script>
@@ -139,6 +144,10 @@ window.addEventListener("message", async (e) => {
   }
   if (d.jsonrpc !== "2.0") return;
   if (d.method === "ui/initialize" && d.id !== undefined) {
+    if (CFG.rejectInit) {
+      reply({ jsonrpc: "2.0", id: d.id, error: { code: -32603, message: "app rejected by this host" } });
+      return;
+    }
     reply({ jsonrpc: "2.0", id: d.id, result: {
       protocolVersion: d.params?.protocolVersion ?? "2026-01-26",
       hostInfo: { name: "fake-host", version: "0.5.0" },

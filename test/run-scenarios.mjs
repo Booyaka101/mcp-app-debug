@@ -8,6 +8,7 @@
 import { spawn, execFile } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -24,6 +25,13 @@ const EXPECTATIONS = {
   "bad-mime": { mustFail: ["resource-uri"], mustPass: ["protocol-revision"] },
   "no-ready": { mustFail: ["ui-initialize", "ui-ready", "tool-call"], mustPass: ["resource-uri", "protocol-revision"] },
   "slow-init": { mustFail: ["ui-initialize"], mustPass: ["ui-ready", "resource-uri", "protocol-revision"] },
+  // The point of this one is the mustPass list: ready and tools/call still look
+  // healthy, which is exactly why a rejected handshake used to slip through.
+  "bad-init-params": {
+    mustFail: ["ui-initialize"],
+    mustPass: ["resource-uri", "csp", "ui-ready", "tool-call", "protocol-revision"],
+    detailContains: { "ui-initialize": "REJECTED the app's ui/initialize" },
+  },
   "tool-error": { mustFail: ["tool-call"], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "protocol-revision"] },
   "csp-meta": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
   "ext-img": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
@@ -241,11 +249,15 @@ await extraCase(
  *   host-drop         fake-host --drop (no capabilities.extensions, tool-result
  *                     _meta stripped) → client-advertises-ui and
  *                     tool-result-meta-preserved FAIL, exit 1
+ *   host-reject-init  fake-host --reject-init (ui/initialize answered with a
+ *                     JSON-RPC error) → ui-initialize-answered FAIL, exit 1
  *   host-no-client    nothing connects → exit 2, "no client connected", no JSON
  *   host-list-only    fake-host --list-only (never calls probe) → chip 1 PASS,
  *                     chips 2-7 INCONCLUSIVE, exit 0
  *   host-scan-dogfood scan mode IS a conformant 2026-07-28 host — both
  *                     directions must go 7/7 at once
+ *   host-protocol-version-split  header and initialize body name different
+ *                     revisions → the fixture says so on stderr
  */
 function spawnCollect(nodeArgs) {
   const proc = spawn(process.execPath, nodeArgs, { stdio: ["ignore", "pipe", "pipe"] });
@@ -367,6 +379,55 @@ await hostCase("host-drop", {
     },
   },
 });
+
+// ext-apps#671: an error reply is a reply. Everything else here is conformant,
+// so only check 4 may move.
+await hostCase("host-reject-init", {
+  port: 3315,
+  windowSec: 60,
+  clientArgs: ["test/fake-host.mjs", "http://localhost:3315/mcp", "--reject-init"],
+  expect: {
+    exit: 1,
+    verdicts: { ...ALL_PASS, "ui-initialize-answered": "fail" },
+    counts: [6, 1, 0],
+    detailContains: { "ui-initialize-answered": "REJECTED the app's ui/initialize (-32603: app rejected by this host)" },
+  },
+});
+
+// ext-apps#671: Claude sends MCP-Protocol-Version as a header while its
+// initialize body asks for a different revision. A fixture that reads only one
+// of the two misreports what was negotiated, so it has to say when they split.
+{
+  const port = 3316;
+  const host = spawnCollect(["dist/cli.js", "host", "--port", String(port), "--json", "--window", "6"]);
+  try {
+    await waitForServer(`http://localhost:${port}/mcp`);
+    await new Promise((resolve) => {
+      const body = JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "split", version: "1" } },
+      });
+      const req = httpRequest(
+        { host: "localhost", port, path: "/mcp", method: "POST",
+          headers: { "Content-Type": "application/json", "MCP-Protocol-Version": "2026-07-28",
+            "Content-Length": Buffer.byteLength(body) } },
+        (res) => { res.resume(); res.on("end", resolve); },
+      );
+      req.on("error", resolve);
+      req.end(body);
+    });
+    const { stderr } = await host.done;
+    const expected = "header says 2026-07-28 but the initialize body asks for 2025-11-25";
+    if (!stderr.includes(expected)) {
+      failures++;
+      console.error(`FAIL host-protocol-version-split:\n   - expected stderr to contain ${JSON.stringify(expected)}\n   - got: ${stderr.slice(-400)}`);
+    } else {
+      console.log("ok   host-protocol-version-split (header/body disagreement reported)");
+    }
+  } finally {
+    host.proc.kill();
+  }
+}
 
 await hostCase("host-no-client", {
   port: 3313,

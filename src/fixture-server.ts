@@ -19,7 +19,7 @@ import { createInterface } from "node:readline";
 import PROBE_HTML_TEMPLATE from "./app/probe.html";
 import { buildHostReport, evaluateHostChecks, PROBE_RESOURCE_URI, UI_EXTENSION } from "./host-checks.js";
 import type { HostCheckResult, HostObservations, ProbeBeacon } from "./types.js";
-import { truncatePayload } from "./types.js";
+import { summarizeRpcError, truncatePayload } from "./types.js";
 
 export interface HostModeOptions {
   port: number;
@@ -65,6 +65,32 @@ function now(fx: Fixture): number {
   return Date.now() - fx.epoch;
 }
 
+/**
+ * A host may send MCP-Protocol-Version as a header while its initialize body
+ * asks for a different revision (Claude does). A server that reads only one of
+ * the two draws the wrong conclusion about what was negotiated, so say it out
+ * loud once both are known. Reported by itsjet26 in ext-apps#671.
+ */
+function noteProtocolVersionSplit(fx: Fixture): void {
+  const { headerProtocolVersion: header, initProtocolVersion: body } = fx.obs;
+  if (!header || !body || header === body || fx.obs.protocolSplitLogged) return;
+  fx.obs.protocolSplitLogged = true;
+  fx.log(
+    `note    MCP-Protocol-Version header says ${header} but the initialize body asks for ${body} ` +
+      "— read both before concluding which revision was negotiated",
+  );
+}
+
+/** The beacon is an untrusted POST body, so the error is shape-checked here. */
+function readRpcError(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const e = raw as { code?: unknown; message?: unknown };
+  return summarizeRpcError(
+    typeof e.code === "number" ? e.code : undefined,
+    typeof e.message === "string" ? e.message : undefined,
+  );
+}
+
 function recordBeacon(fx: Fixture, via: ProbeBeacon["via"], raw: unknown): void {
   const p = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const beacon: ProbeBeacon = {
@@ -78,6 +104,7 @@ function recordBeacon(fx: Fixture, via: ProbeBeacon["via"], raw: unknown): void 
       typeof p.uiInitializeAnswered === "boolean" ? p.uiInitializeAnswered : undefined,
     uiInitializeLatencyMs:
       typeof p.uiInitializeLatencyMs === "number" ? p.uiInitializeLatencyMs : undefined,
+    uiInitializeError: readRpcError(p.uiInitializeError),
     hostInfo: p.hostInfo,
     sawToolInput: typeof p.sawToolInput === "boolean" ? p.sawToolInput : undefined,
     sawToolResult: typeof p.sawToolResult === "boolean" ? p.sawToolResult : undefined,
@@ -167,6 +194,10 @@ function handleMessageInner(fx: Fixture, msg: JsonRpcMessage): Record<string, un
           : {};
       const info = params?.clientInfo;
       if (info && typeof info === "object") obs.clientInfo ??= info as { name?: string };
+      if (typeof params?.protocolVersion === "string") {
+        obs.initProtocolVersion ??= params.protocolVersion;
+        noteProtocolVersionSplit(fx);
+      }
       return ok({
         // Echo the client's requested version — the fixture accommodates,
         // it does not negotiate; the chips grade behaviour, not version taste.
@@ -342,6 +373,11 @@ function makeHttpServer(fx: Fixture): http.Server {
       // "no server-push stream" and carry on.
       res.writeHead(405).end();
       return;
+    }
+    const headerVersion = req.headers["mcp-protocol-version"];
+    if (typeof headerVersion === "string") {
+      fx.obs.headerProtocolVersion ??= headerVersion;
+      noteProtocolVersionSplit(fx);
     }
     let json: unknown;
     try {

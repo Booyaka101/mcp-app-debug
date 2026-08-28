@@ -26,7 +26,7 @@ import {
   type ServerConnection,
 } from "./mcp.js";
 import type { CheckReport, CheckResult, HarnessConfig, HarnessState, LogEntry } from "./types.js";
-import { truncatePayload } from "./types.js";
+import { summarizeRpcError, truncatePayload } from "./types.js";
 
 export interface HostOptions {
   connect: ConnectTarget;
@@ -454,10 +454,20 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
       case "ui-initialize":
         if (!inst2) state.uiInitializeAt = entry.ts;
         break;
-      case "ui-initialize-response":
-        if (inst2) { if (state.instance2) state.instance2.uiInitializeRespondedAt = entry.ts; }
-        else state.uiInitializeRespondedAt = entry.ts;
+      case "ui-initialize-response": {
+        const err = entry.data as { code?: number; message?: string } | undefined;
+        const rejection = err ? summarizeRpcError(err.code, err.message) : undefined;
+        if (inst2) {
+          if (state.instance2) {
+            state.instance2.uiInitializeRespondedAt = entry.ts;
+            state.instance2.uiInitializeError = rejection;
+          }
+        } else {
+          state.uiInitializeRespondedAt = entry.ts;
+          state.uiInitializeError = rejection;
+        }
         break;
+      }
       case "ui-ready":
         if (inst2) {
           if (state.instance2) state.instance2.readyAt = entry.ts;
