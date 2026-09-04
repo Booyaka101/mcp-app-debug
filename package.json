@@ -1,6 +1,6 @@
 {
   "name": "mcp-app-debug",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "description": "Debug both ends of MCP Apps — render your server's app in a Playwright browser with 7 automated diagnostics (npx mcp-app-debug <server-url>), or grade a HOST's MCP Apps conformance with a probe fixture server (npx mcp-app-debug host). Speaks the 2025-11-25 and stateless 2026-07-28 MCP revisions, and --aggregator reproduces the namespacing-gateway failure that breaks apps calling their tools by the bare name.",
   "type": "module",
   "bin": {
