@@ -12,8 +12,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { chromium, type Browser, type Frame, type Page } from "playwright";
-import { buildReport, evaluateChecks, evaluateProfileChecks } from "./checks.js";
+import { buildReport, evaluateAggregatorCheck, evaluateChecks, evaluateProfileChecks } from "./checks.js";
 import { buildCspHeader, scanMetaCspForFrameAncestors, type ResourceCsp } from "./csp.js";
+import { isUnknownNamespaceError, UNKNOWN_NAMESPACE_CODE } from "./mcp/aggregator.js";
+import { callToolWithId } from "./mcp/connect.js";
 import type { ProfileDescriptor } from "./profiles/index.js";
 import {
   connectToServer,
@@ -46,6 +48,9 @@ export interface HostOptions {
   logFile?: string;
   /** active host profile — enables checks 8-10; absent = 0.5.0 behaviour */
   profile?: ProfileDescriptor;
+  /** tool-name rewrite prefix (--aggregator, or a descriptor's
+   * toolNameRewrite) — enables check 11 */
+  aggregatorPrefix?: string;
 }
 
 export type ScanOutcome =
@@ -146,8 +151,12 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
   process.stderr.write(`\nmcp-app-debug — connecting to ${serverLabel}\n\n`);
   let conn: ServerConnection;
   try {
-    conn = await connectToServer(opts.connect, opts.protocol, (message) =>
-      early({ ts: 0, dir: "server", kind: "event", method: "negotiate", payload: message }),
+    conn = await connectToServer(
+      opts.connect,
+      opts.protocol,
+      (message) =>
+        early({ ts: 0, dir: "server", kind: "event", method: "negotiate", payload: message }),
+      opts.aggregatorPrefix,
     );
   } catch (e) {
     process.stderr.write(`${color(31, "x connection failed:")} ${e instanceof Error ? e.message : e}\n`);
@@ -163,11 +172,14 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
 
   /* ---- 2. pick the tool */
   const uiTools = findUiTools(conn.tools);
-  let chosen = opts.tool
-    ? uiTools.find((t) => t.tool.name === opts.tool)
+  // Under --aggregator the tool list carries rewritten names, so --tool is
+  // matched on either spelling: advertise() leaves an already-prefixed name be.
+  const wanted = opts.tool && conn.aggregator ? conn.aggregator.advertise(opts.tool) : opts.tool;
+  let chosen = wanted
+    ? uiTools.find((t) => t.tool.name === wanted)
     : uiTools[0];
-  if (opts.tool && !chosen) {
-    const plain = conn.tools.find((t) => t.name === opts.tool);
+  if (wanted && !chosen) {
+    const plain = conn.tools.find((t) => t.name === wanted);
     if (!plain) {
       process.stderr.write(
         `${color(31, "x")} tool "${opts.tool}" not found. Server tools: ${conn.tools.map((t) => t.name).join(", ") || "(none)"}\n`,
@@ -186,6 +198,17 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
   }
 
   const tool = chosen.tool;
+  if (conn.aggregator) {
+    const agg = conn.aggregator;
+    state.aggregator = {
+      prefix: agg.prefix,
+      separator: agg.separator,
+      advertised: tool.name,
+      upstream: agg.upstream(tool.name) ?? tool.name,
+      appCalls: [],
+      listedViaBridge: false,
+    };
+  }
   state.resourceUri = chosen.resourceUri ?? (tool._meta as { ui?: { resourceUri?: string } })?.ui?.resourceUri;
   state.resourceUriValid = !!chosen.resourceUri;
   if (chosen.uriError) state.resourceError = chosen.uriError;
@@ -288,6 +311,8 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     toolName: tool.name,
     toolTitle: tool.title,
     toolArgs,
+    toolDefinition: tool as unknown as Record<string, unknown>,
+    aggregatorPrefix: conn.aggregator?.prefix,
     mode: opts.mode,
     modeNote: opts.modeNote,
     profile: profileConfig,
@@ -392,6 +417,13 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
         ...checks,
         ...(done ? profileChecks : profileChecks.filter((c) => resolved.has(c.id))),
       ];
+    }
+    // Chip 11 waits for the app to address a name, so a run that has not
+    // called a tool yet shows pending rather than flashing SKIP (the same rule
+    // the profile chips follow).
+    const aggregatorCheck = evaluateAggregatorCheck(state);
+    if (aggregatorCheck && (done || (state.aggregator?.appCalls.length ?? 0) > 0)) {
+      checks = [...checks, aggregatorCheck];
     }
     page
       .evaluate(
@@ -514,6 +546,10 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     if (entry.marker) pushChecks(false);
   });
 
+  // The JSON-RPC id of each instance's simulated model call, for
+  // hostContext.toolInfo.id once it exists.
+  const toolCallIds: Record<number, string | number | undefined> = {};
+
   // page -> node: MCP proxy (manual AppBridge handlers call this)
   await page.exposeBinding("__mcpProxy", async (source, op: string, params: unknown) => {
     if (source.frame !== page.mainFrame()) {
@@ -529,13 +565,26 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
           ? "tools/call (app-initiated) -> server"
           : "tools/call (harness LLM sim) -> server";
         note(label, truncatePayload(p), "server");
+        if (fromApp && conn.aggregator && state.aggregator) {
+          const advertisedFor = conn.aggregator.advertise(name);
+          state.aggregator.appCalls.push({
+            name,
+            bare: !conn.aggregator.isAdvertised(name),
+            ...(conn.aggregator.isAdvertised(advertisedFor) ? { advertisedFor } : {}),
+          });
+        }
         try {
-          const result = (await conn.mcp.callTool(
+          const call = await callToolWithId(
+            conn.mcp,
             p as { name: string; arguments?: Record<string, unknown> },
-          )) as { isError?: boolean };
+          );
+          const result = call.result as { isError?: boolean };
           const isError = result.isError === true;
           if (fromApp) state.appToolCalls.push({ name, isError, at: Date.now() });
-          else state.harnessToolCall = { name, isError };
+          else {
+            state.harnessToolCall = { name, isError };
+            toolCallIds[1] = call.id;
+          }
           note(`server result (${isError ? "isError" : "ok"})`, truncatePayload(result), "server");
           pushChecks(false);
           return result;
@@ -543,6 +592,14 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
           const msg = e instanceof Error ? e.message : String(e);
           if (fromApp) state.appToolCalls.push({ name, isError: true, at: Date.now() });
           else state.harnessToolCall = { name, isError: true };
+          if (isUnknownNamespaceError(e)) {
+            // The gateway refuses the name before any upstream sees it, and the
+            // app must get the JSON-RPC error frame from ext-apps#745 rather
+            // than an isError result — the page turns this into that frame.
+            note(`aggregator refused tools/call (${UNKNOWN_NAMESPACE_CODE})`, msg, "server");
+            pushChecks(false);
+            return { __mcpAppDebugRpcError: { code: e.code, message: msg } };
+          }
           note("server tools/call threw", msg, "error");
           pushChecks(false);
           return { content: [{ type: "text", text: `tools/call failed: ${msg}` }], isError: true };
@@ -579,10 +636,22 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
       case "tools/call:instance2": {
         // check 9 — instance #2's own LLM-sim call (not counted anywhere)
         note("tools/call (instance #2 harness) -> server", truncatePayload(p), "server");
-        return await conn.mcp.callTool(
+        const call = await callToolWithId(
+          conn.mcp,
           p as { name: string; arguments?: Record<string, unknown> },
         );
+        toolCallIds[2] = call.id;
+        return call.result;
       }
+      case "tools/list": {
+        // ext-apps#745 names tools/list as the app's other legitimate route to
+        // the name the host knows, so it must show the rewritten names too.
+        if (state.aggregator) state.aggregator.listedViaBridge = true;
+        note("tools/list (app-initiated) -> server", truncatePayload(p), "server");
+        return await conn.mcp.listTools();
+      }
+      case "harness/tool-call-id":
+        return toolCallIds[Number(p.instance ?? 1)] ?? null;
       case "resources/list":
         return await conn.mcp.listResources(p);
       case "resources/read":
@@ -653,7 +722,11 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     const poll = setInterval(() => {
       if (pageClosed) return finish();
       if (opts.fullWindow) return;
-      if (evaluateChecks(state, opts.profile).every((c) => c.pass) && profileResolved()) {
+      if (
+        evaluateChecks(state, opts.profile).every((c) => c.pass) &&
+        (evaluateAggregatorCheck(state)?.pass ?? true) &&
+        profileResolved()
+      ) {
         allPassSince ??= Date.now();
         if (Date.now() - allPassSince >= EARLY_EXIT_QUIET_MS) {
           note("all checks passed — ending observation early (--full-window to wait the full window)");

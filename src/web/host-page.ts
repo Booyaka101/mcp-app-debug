@@ -15,7 +15,7 @@ import {
   buildAllowAttribute,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { ListToolsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { CheckResult, HarnessConfig, LogEntry } from "../types.js";
 import { truncatePayload } from "../types.js";
 
@@ -111,6 +111,9 @@ const PROFILE_CHECK_TITLES: Array<[string, string]> = [
   ["external-navigation", "external nav"],
 ];
 
+/** Chip 11 exists only when a tool-name rewrite is active. */
+const AGGREGATOR_CHECK_TITLE: [string, string] = ["aggregator-safe-tool-names", "tool names"];
+
 function el(tag: string, attrs: Record<string, string> = {}, text?: string): HTMLElement {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
@@ -141,9 +144,11 @@ function buildPanel(config: HarnessConfig): void {
   document.body.appendChild(header);
 
   const checks = el("div", { id: "checks" });
-  const chipList = config.profile
-    ? [...CHECK_TITLES, ...PROFILE_CHECK_TITLES]
-    : CHECK_TITLES;
+  const chipList = [
+    ...CHECK_TITLES,
+    ...(config.profile ? PROFILE_CHECK_TITLES : []),
+    ...(config.aggregatorPrefix ? [AGGREGATOR_CHECK_TITLE] : []),
+  ];
   for (const [id, label] of chipList) {
     const chip = el("div", { class: "chip", id: `chip-${id}`, title: "pending…" });
     chip.appendChild(el("span", { class: "dot" }));
@@ -338,6 +343,55 @@ class LoggingTransport implements Transport {
 
 /* ------------------------------------------------------------ main harness */
 
+/**
+ * The hostContext both bridges hand the app in the ui/initialize result.
+ *
+ * `toolInfo` is the 2026-01-26 apps spec field an app reads to learn the name
+ * the host knows a tool by — the one thing that survives a namespacing
+ * aggregator (ext-apps#745, #753). `toolInfo.id` is filled in later: this
+ * harness mounts the view from resources/read and only then simulates the
+ * model's tools/call, so the request id does not exist yet at handshake time.
+ */
+function hostContext(config: HarnessConfig): Record<string, unknown> {
+  return {
+    toolInfo: { tool: config.toolDefinition },
+    theme: "light",
+    platform: "web",
+    displayMode: "inline",
+    availableDisplayModes: ["inline"],
+    containerDimensions: { maxHeight: 4000 },
+    locale: navigator.language,
+  };
+}
+
+/**
+ * Publish the real JSON-RPC id of the tools/call once it is on the wire.
+ * Never throws: it runs between the server call and the tool-result, and
+ * failing here would send the app a tool-cancelled for a call that succeeded.
+ */
+async function announceToolCallId(
+  bridge: AppBridge,
+  config: HarnessConfig,
+  instance: number,
+): Promise<void> {
+  try {
+    const id = (await window.__mcpProxy("harness/tool-call-id", { instance })) as
+      | string
+      | number
+      | null;
+    if (id === null) return;
+    bridge.setHostContext({
+      ...hostContext(config),
+      toolInfo: { id, tool: config.toolDefinition },
+    });
+  } catch (e) {
+    log({
+      ts: now(), dir: "error", kind: "event", method: "tool-call-id-unavailable",
+      payload: truncatePayload(e instanceof Error ? e.message : e),
+    });
+  }
+}
+
 async function main(): Promise<void> {
   const config: HarnessConfig = await (await fetch("/config")).json();
   buildPanel(config);
@@ -403,16 +457,7 @@ async function main(): Promise<void> {
     null,
     { name: "mcp-app-debug", version: __APP_VERSION__ },
     capabilities,
-    {
-      hostContext: {
-        theme: "light",
-        platform: "web",
-        displayMode: "inline",
-        availableDisplayModes: ["inline"],
-        containerDimensions: { maxHeight: 4000 },
-        locale: navigator.language,
-      },
-    },
+    { hostContext: hostContext(config) },
   );
 
   if (config.mode === "trusted") registerProxyHandlers(bridge);
@@ -457,6 +502,7 @@ async function main(): Promise<void> {
       name: config.toolName,
       arguments: config.toolArgs,
     });
+    await announceToolCallId(bridge, config, 1);
     await bridge.sendToolResult(profile ? plantNonce(result, profile.instanceNonces[0]) : result);
   } catch (e) {
     await bridge.sendToolCancelled({ reason: e instanceof Error ? e.message : String(e) });
@@ -505,10 +551,30 @@ function waitForProxyReady(iframe: HTMLIFrameElement, instance: number): Promise
   });
 }
 
+interface ProtocolHandlers {
+  setRequestHandler(schema: unknown, handler: (request: unknown) => Promise<unknown>): void;
+}
+
 /** Manual proxy handlers — the Node side holds the real MCP client. */
 function registerProxyHandlers(bridge: AppBridge): void {
-  bridge.oncalltool = async (params) =>
-    await window.__mcpProxy("tools/call", params);
+  bridge.oncalltool = async (params) => {
+    const result = await window.__mcpProxy("tools/call", params);
+    const rejection = (result as { __mcpAppDebugRpcError?: { code: number; message: string } })
+      ?.__mcpAppDebugRpcError;
+    // A namespacing aggregator answers an unowned name with a JSON-RPC error,
+    // not a result — Protocol turns a thrown `code` into exactly that frame.
+    if (rejection) throw Object.assign(new Error(rejection.message), { code: rejection.code });
+    return result;
+  };
+  // The App Bridge has no listServerTools, so an app that wants the host's
+  // tool names hand-rolls this frame — ext-apps#745's other correct route.
+  // The cast is because ext-apps' published .d.ts imports its base class with
+  // extensionless paths, which NodeNext cannot resolve, so AppBridge's
+  // inherited Protocol members are invisible to tsc (present at runtime).
+  (bridge as unknown as ProtocolHandlers).setRequestHandler(
+    ListToolsRequestSchema,
+    async () => await window.__mcpProxy("tools/list", {}),
+  );
   bridge.onlistresources = async (params) =>
     await window.__mcpProxy("resources/list", params ?? {});
   bridge.onreadresource = async (params) =>
@@ -625,16 +691,7 @@ async function mountSecondInstance(
     null,
     { name: "mcp-app-debug", version: __APP_VERSION__ },
     capabilities,
-    {
-      hostContext: {
-        theme: "light",
-        platform: "web",
-        displayMode: "inline",
-        availableDisplayModes: ["inline"],
-        containerDimensions: { maxHeight: 4000 },
-        locale: navigator.language,
-      },
-    },
+    { hostContext: hostContext(config) },
   );
   if (config.mode === "trusted") registerProxyHandlers(bridge2);
   bridge2.onsizechange = ({ height }) => {
@@ -661,6 +718,7 @@ async function mountSecondInstance(
       name: config.toolName,
       arguments: config.toolArgs,
     });
+    await announceToolCallId(bridge2, config, 2);
     await bridge2.sendToolResult(plantNonce(result, profile.instanceNonces[1]));
   } catch (e) {
     await bridge2.sendToolCancelled({ reason: e instanceof Error ? e.message : String(e) });

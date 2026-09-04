@@ -39,9 +39,14 @@ export interface LogEntry {
 export interface HarnessConfig {
   serverUrl: string;
   serverName: string;
+  /** the name the harness advertises — rewritten under --aggregator */
   toolName: string;
   toolTitle?: string;
   toolArgs: Record<string, unknown>;
+  /** hostContext.toolInfo.tool: the tool this run resolved, under the
+   * advertised name (2026-01-26 apps spec, "Metadata of the tool call that
+   * instantiated the View") */
+  toolDefinition: Record<string, unknown>;
   mode: "trusted" | "strict";
   modeNote?: string;
   sandboxUrl: string;
@@ -59,6 +64,9 @@ export interface HarnessConfig {
   backlog?: LogEntry[];
   /** set only when --profile is active — drives checks 8-10 in the page */
   profile?: HarnessProfileConfig;
+  /** set only under --aggregator (or a descriptor's toolNameRewrite) — the
+   * page shows the check 11 chip when it is present */
+  aggregatorPrefix?: string;
 }
 
 /** The slice of an active profile descriptor the host page needs. */
@@ -103,7 +111,8 @@ export interface CheckResult {
     | "protocol-revision"
     | "tool-result-redelivery"
     | "multi-instance-isolation"
-    | "external-navigation";
+    | "external-navigation"
+    | "aggregator-safe-tool-names";
   title: string;
   pass: boolean;
   detail: string;
@@ -182,6 +191,24 @@ export interface HarnessState {
     /** frames observed on instance 1 carrying instance 2's marker, and vice versa */
     leaksOn1: number;
     leaksOn2: number;
+  };
+  /** check 11 — tool-name rewrite; undefined outside --aggregator runs (and
+   * descriptors that set toolNameRewrite), which is what keeps the check off
+   * the bare spec profile */
+  aggregator?: {
+    prefix: string;
+    /** the trailing separator of the prefix — `__` for `alpha__` */
+    separator: string;
+    /** the name the harness advertised for the tool under test */
+    advertised: string;
+    /** the name the upstream server knows it by */
+    upstream: string;
+    /** app-initiated tools/call names in order, with the bare verdict and the
+     * name the host advertises for that tool when it owns one (a bare call can
+     * be for a sibling tool, which is #745's own report) */
+    appCalls: Array<{ name: string; bare: boolean; advertisedFor?: string }>;
+    /** the app listed tools through the bridge, so it could derive names there */
+    listedViaBridge: boolean;
   };
   /** check 10 — external-navigation probe from inside the sandbox */
   navProbe?: {

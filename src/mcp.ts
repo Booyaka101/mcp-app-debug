@@ -9,6 +9,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { Resource, Tool } from "@modelcontextprotocol/sdk/types.js";
+import { aggregatorConn, createAggregator, type Aggregator } from "./mcp/aggregator.js";
 import { targetLabel, type ConnectTarget, type McpConn } from "./mcp/connect.js";
 import { negotiateConnection, type ProtocolChoice } from "./mcp/negotiate.js";
 
@@ -19,19 +20,37 @@ export interface ServerConnection {
   mcp: McpConn;
   serverName: string;
   transportKind: McpConn["transportKind"];
+  /** tools under the names the harness advertises (rewritten under --aggregator) */
   tools: Tool[];
   resources: Map<string, Resource>;
+  /** set when a tool-name rewrite is active; drives check 11 */
+  aggregator?: Aggregator;
 }
 
 export async function connectToServer(
   target: ConnectTarget,
   protocol: ProtocolChoice,
   log: (message: string) => void,
+  /** rewrite every tool name to `<prefix><name>`, as a namespacing gateway does */
+  aggregatorPrefix?: string,
 ): Promise<ServerConnection> {
-  const mcp = await negotiateConnection(target, protocol, log);
+  let mcp = await negotiateConnection(target, protocol, log);
 
   const serverName = mcp.getServerVersion()?.name ?? targetLabel(target);
   const toolsList = await mcp.listTools();
+
+  let aggregator: Aggregator | undefined;
+  let tools = toolsList.tools;
+  if (aggregatorPrefix) {
+    const gateway = createAggregator(aggregatorPrefix, tools.map((t) => t.name));
+    tools = tools.map((t) => ({ ...t, name: gateway.advertise(t.name) }));
+    mcp = aggregatorConn(mcp, gateway);
+    aggregator = gateway;
+    log(
+      `aggregator mode: advertising ${tools.length} tool(s) as "${aggregatorPrefix}<name>" — ` +
+        "a call carrying the bare name is answered -32043 (ext-apps#745)",
+    );
+  }
 
   // resources/list is optional server-side; UI metadata may live at listing level
   let resources = new Map<string, Resource>();
@@ -42,7 +61,7 @@ export async function connectToServer(
     // server has no resources capability — resource read will surface errors
   }
 
-  return { mcp, serverName, transportKind: mcp.transportKind, tools: toolsList.tools, resources };
+  return { mcp, serverName, transportKind: mcp.transportKind, tools, resources, aggregator };
 }
 
 export interface UiTool {

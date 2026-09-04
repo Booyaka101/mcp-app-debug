@@ -10,7 +10,11 @@ clients, shows **every postMessage exchange live in a side panel**, and gives
 you **7 automated PASS/FAIL diagnostics** that tell you exactly where the flow
 broke. When it renders on one host but not another, `--profile` adds three
 cross-host checks and tells you **whether the fault is yours or the host's** —
-see [Host profiles](#host-profiles-and-the-fault-verdict---profile). It speaks **both current MCP revisions** — the stateless 2026-07-28
+see [Host profiles](#host-profiles-and-the-fault-verdict---profile), and
+[`--aggregator`](#behind-a-gateway---aggregator) puts a namespacing gateway in
+front of your server to catch the one bug you cannot see locally: an app
+calling its tools by the bare name.
+It speaks **both current MCP revisions** — the stateless 2026-07-28
 protocol (`server/discover`, `_meta` envelopes) and the 2025-11-25
 `initialize` handshake — and auto-detects which one your server is on.
 
@@ -151,7 +155,11 @@ baseline first, so the verdict is always computable.
 > reproduce a reported symptom locally, not a claim about what any vendor's
 > host does today. This tool still does not claim to verify host compliance
 > with SEP-1865. Read `src/profiles/*.json`; they are short, and you can pass
-> your own descriptor path instead of a built-in name.
+> your own descriptor path instead of a built-in name. Check 11 sits outside
+> this scheme for the same reason: fronting servers with a namespacing
+> aggregator is a deployment choice, not something the spec asks of an app, so
+> it runs only where you say a rewrite is in play (`--aggregator`, or a
+> descriptor with `toolNameRewrite`) and never on a bare `spec` run.
 
 ### Checks 8-10 (profile mode only)
 
@@ -257,6 +265,141 @@ the observation plus the raw protocol frames behind it:
 With `--profile all`, `--video`, `--screenshot` and `--log-file` are written
 once per profile, suffixed with the profile name
 (`session.spec.webm`, `session.grok.webm`, …).
+
+## Behind a gateway (`--aggregator`)
+
+Your app works. Then somebody puts your server behind an MCP gateway that
+namespaces tool names to avoid collisions, and every button in your widget
+stops working, while the model's calls keep going through.
+
+[ext-apps #745](https://github.com/modelcontextprotocol/ext-apps/issues/745)
+has the frames. The gateway exposes an upstream's `get-time` as
+`alpha__get-time`, so the app's call:
+
+```json
+{"method":"tools/call","params":{"name":"get-time"}}
+{"error":{"code":-32043,"message":"unknown name \"get-time\": no upstream owns this namespace"}}
+```
+
+and the model's call with `alpha__get-time` succeeds.
+[#753](https://github.com/modelcontextprotocol/ext-apps/issues/753) counts
+**fifteen official example apps** with the bare name written into the bundle,
+including the six `basic-server-*` templates, which are what third parties
+fork. Both issues name the same fix: read
+`getHostContext().toolInfo.tool.name`, the name the *host* knows.
+
+`--aggregator` puts that gateway in front of your server locally:
+
+```bash
+npx mcp-app-debug http://localhost:3001/mcp --aggregator            # prefix alpha__
+npx mcp-app-debug http://localhost:3001/mcp --aggregator gateway.   # your own prefix
+```
+
+Every tool is advertised to your app as `<prefix><name>`, `toolInfo` carries
+that name, and a `tools/call` arriving with the bare name is answered with
+#745's error instead of being fulfilled, so the failure happens on your
+machine rather than in somebody's production gateway. The model-side simulation
+uses the rewritten name throughout, because that is what a real aggregating
+host holds. A tool whose name already contains the separator is not prefixed
+twice.
+
+### Check 11 (aggregator mode only)
+
+11. **aggregator-safe tool names** — every `tools/call` your app initiated used
+    the name the host advertised, taken either from `hostContext.toolInfo` or
+    from a `tools/list` through the bridge (#745 names both routes). `SKIP`s
+    when the app never called a tool, because check 6 already reports that. A
+    FAIL is `APP-FAULT` even under a non-spec profile: both issues put the fix
+    in the app.
+
+Captured output, not hand-written. This is the bundled `bare-names` fixture, a
+view with its tool name written in (the #753 shape), run with the descriptor
+below so the spec baseline goes first:
+
+```
+Profile aggregator — server http://localhost:3601/mcp, tool alpha__forecast, mode trusted
+  ...
+  FAIL   6 app-initiated tools/call     app made 2 tools/call(s), all returned errors (first: "forecast")
+  ...
+  FAIL  11 aggregator-safe tool names   app sent tools/call name="forecast" but the host advertised "alpha__forecast" in hostContext.toolInfo.tool.name; a namespacing aggregator answers -32043 for the bare name and every interaction after mount fails (ext-apps#745, #753)
+
+                                  spec        aggregator
+1 ui:// resource resolves         PASS        PASS
+2 CSP permits embedding & assets  PASS        PASS
+3 _meta.ui.domain origin          PASS        PASS
+4 ui/initialize handshake         PASS        PASS
+5 ui/ready notification           PASS        PASS
+6 app-initiated tools/call        PASS        FAIL
+7 protocol revision               PASS        PASS
+8 tool-result redelivery          PASS        PASS
+9 multi-instance isolation        PASS        PASS
+10 external navigation            INFO        INFO
+11 aggregator-safe tool names     SKIP        FAIL
+
+VERDICT: APP-FAULT — aggregator-safe tool names fail(s) under aggregator; the app must read the tool name the host advertises (ext-apps#745, #753)
+```
+
+Check 6 fails alongside it, and that is the honest reading: behind a real
+gateway this widget renders and then does nothing. Its fixed twin
+(`resolved-names`, the same view using #753's `resolveToolName()`) passes both:
+
+```
+  PASS   6 app-initiated tools/call     app called "alpha__forecast" → non-error result (2 app call(s) total)
+  PASS  11 aggregator-safe tool names   app resolved "alpha__forecast" from hostContext.toolInfo (2 app call(s), 0 bare)
+```
+
+Without `--profile` it is the plain seven checks plus row 11, and the panel
+gets a `tool names` chip. The log has the whole exchange: the model's call
+going out as `alpha__forecast`, the app's coming back `-32043`, and the
+`toolInfo` the app should have read.
+
+![aggregator mode: the app calls the bare name and gets -32043](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/aggregator.png)
+
+The check only exists when you ask for it. A run without `--aggregator` has no
+row 11 at all, and `--profile spec` never gains one, because fronting servers
+with a gateway is a deployment choice rather than something the spec asks of an
+app. A descriptor can turn it on for one profile instead of the whole run:
+
+```json
+{
+  "name": "aggregator",
+  "description": "spec knobs plus a namespacing gateway in front of the server",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": { "frameAncestors": "'self'", "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+           "defaultSrc": "'self' 'unsafe-inline'", "objectSrc": "'self' 'unsafe-inline'" },
+  "popupsAllowed": false,
+  "redeliversToolResult": true,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": true,
+  "toolNameRewrite": "alpha__",
+  "sources": ["https://github.com/modelcontextprotocol/ext-apps/issues/745",
+              "https://github.com/modelcontextprotocol/ext-apps/issues/753"]
+}
+```
+
+`--profile all --aggregator` then prints an eleven-row matrix, with
+`aggregator-safe-tool-names` in `matrix.checks` under `--json`.
+
+### `hostContext.toolInfo`, with or without the flag
+
+None of the above works if the host never tells the app which name it used.
+The 2026-01-26 apps spec lists `toolInfo` on `hostContext`, "Metadata of the
+tool call that instantiated the View", and until 0.7.0 this harness did not
+send it, so an app written the correct way found nothing to read. It is there
+now on every run, both for the mounted view and for check 9's second instance:
+
+```json
+{"toolInfo":{"id":4,"tool":{"name":"forecast","title":"Forecast",
+  "description":"Returns a forecast for a city.",
+  "inputSchema":{"type":"object","properties":{"city":{"default":"Tokyo","type":"string"}}}}}}
+```
+
+`toolInfo.id` is the real JSON-RPC id of the `tools/call` on the wire. It
+arrives a moment after the handshake, over
+`ui/notifications/host-context-changed`, because this harness mounts the view
+from `resources/read` and only then simulates the model's call: at
+`ui/initialize` time the name exists and the id does not. Apps read the name,
+which is there from the first frame.
 
 ## Grade a host (`host` conformance mode)
 
@@ -453,6 +596,9 @@ everything else looks healthy.
 --profile <name>     spec | claude-desktop | claude-web | chatgpt | grok | all
                      (or a path to your own descriptor .json) — adds checks
                      8-10 and the fault verdict; omit for the 7-check run
+--aggregator [pfx]   simulate a namespacing aggregator: advertise every tool as
+                     "<prefix><name>" and answer -32043 for the bare name —
+                     adds check 11        (default prefix: alpha__)
 --tool <name>        tool to render (default: first tool with _meta.ui.resourceUri)
 --args <json>        tool arguments (default: inputSchema defaults)
 --mode <mode>        trusted | strict | 3p            (default: trusted)
@@ -482,30 +628,37 @@ double-iframe sandbox files the package ships) with `--drop` (the
 pydantic-ai#6613 shape: no `capabilities.extensions`, tool-result `_meta`
 stripped) and `--list-only` modes.
 
-For profile mode, `test/profile-server.mjs` ships six scenarios (HTTP or
-`--stdio`): `weather` (an argument-sensitive tool, so checks 8-10 all
-resolve), `first-only` (the varied second call errors — check 8 FAILs),
-`leak` (a view that broadcasts its tool-result to sibling instances through a
-shared storage key — check 9 FAILs), `popup` (a view that calls `window.open`
-on load), `noargs` (nothing to vary — check 8 must SKIP, not fail) and
-`singleton` (the `ui://` resource can only be read once — check 9 must SKIP).
-`test/profiles/` holds descriptor fixtures, including one with `sources: []`
-that must be refused at load and one that claims `popupsAllowed` while
-withholding the `allow-popups` token, which check 10 must catch and blame on
-the sandbox.
+For profile and aggregator mode, `test/profile-server.mjs` ships ten
+scenarios (HTTP or `--stdio`): `weather` (an argument-sensitive tool, so
+checks 8-10 all resolve), `first-only` (the varied second call errors — check
+8 FAILs), `leak` (a view that broadcasts its tool-result to sibling instances
+through a shared storage key — check 9 FAILs), `popup` (a view that calls
+`window.open` on load), `noargs` (nothing to vary — check 8 must SKIP, not
+fail), `singleton` (the `ui://` resource can only be read once — check 9 must
+SKIP), `bare-names` (the ext-apps#753 shape, the tool name written into the
+bundle — check 11 FAILs under `--aggregator`), `resolved-names` (#753's
+`resolveToolName()` reading `hostContext.toolInfo.tool.name` — check 11 PASSes
+either way), `listed-names` (the same job done with a `tools/list` through the
+bridge, #745's other correct route) and `namespaced` (a tool already called
+`alpha__forecast` upstream, which must not be prefixed twice). `test/profiles/` holds descriptor
+fixtures, including one with `sources: []` that must be refused at load, one
+that claims `popupsAllowed` while withholding the `allow-popups` token (check
+10 must catch it and blame the sandbox) and one that sets `toolNameRewrite`.
 
-`test/checks-unit.ts` asserts the checks 8-10 decision logic directly, for the
-branches a real browser cannot force reliably — a browser-level popup block as
-opposed to a sandbox-level one, or a second instance that mounts but never
-completes its handshake. Those are exactly the branches whose wording a user
-acts on, so they are tested rather than left unexecuted.
+`test/checks-unit.ts` asserts the checks 8-11 decision logic and the
+aggregator name mapping directly, for the branches a real browser cannot force
+reliably — a browser-level popup block as opposed to a sandbox-level one, a
+second instance that mounts but never completes its handshake, a bare name
+among otherwise correct calls. Those are exactly the branches whose wording a
+user acts on, so they are tested rather than left unexecuted.
 
 `npm test` asserts every scenario trips exactly the right checks on its
 revision (the shared scenarios trip identical check ids on both), plus
-strict-mode, stdio (both revisions), forced-`--protocol`, five host-mode cases
-and thirteen profile cases — a `--profile all` matrix snapshot, both honest
-SKIPs, profile-over-stdio, and per-profile artifact suffixing — for 40
-assertions, plus 22 unit assertions. All green in CI on Linux and Windows.
+strict-mode, stdio (both revisions), forced-`--protocol`, five host-mode cases,
+thirteen profile cases — a `--profile all` matrix snapshot, both honest SKIPs,
+profile-over-stdio, and per-profile artifact suffixing — and nine aggregator
+cases. It prints 52 `ok` lines: 51 scenario assertions plus one for the 44 unit
+assertions in `test/checks-unit.ts`. All green in CI on Linux and Windows.
 
 ## Architecture
 
@@ -529,6 +682,11 @@ assertions, plus 22 unit assertions. All green in CI on Linux and Windows.
 - Profiles (`src/profiles/`) are plain JSON validated with zod at load time and
   shipped in the package; `src/profile-run.ts` runs the scan once per
   descriptor and computes the verdict.
+- `--aggregator` lives in the connection layer (`src/mcp/aggregator.ts`), which
+  wraps a `McpConn` so the rewrite applies to everything downstream: the tool
+  list the harness advertises, `hostContext.toolInfo`, the simulated model call
+  and the app's own `tools/call`. A name it does not own is refused there,
+  before the server sees it.
 
 ## Development
 
@@ -537,7 +695,7 @@ npm install
 npm run build        # esbuild: node CLI bundle + 2 browser bundles
 npm run typecheck    # tsc, types only
 node dist/cli.js <server-url>
-npm test             # 40 assertions + 22 unit assertions, all must pass
+npm test             # 51 scenario + 44 unit assertions, all must pass
 ```
 
 A handy live target is the official example server:

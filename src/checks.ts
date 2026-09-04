@@ -328,6 +328,54 @@ export function evaluateProfileChecks(
   return checks;
 }
 
+/**
+ * Check 11 — aggregator-safe tool names. Returns null unless a name rewrite is
+ * active (`--aggregator`, or a descriptor's `toolNameRewrite`): aggregation is
+ * a deployment shape, not something the spec requires of an app, so the check
+ * does not exist on a bare `spec` run.
+ */
+export function evaluateAggregatorCheck(state: HarnessState): CheckResult | null {
+  const agg = state.aggregator;
+  if (!agg) return null;
+  const id = "aggregator-safe-tool-names" as const;
+  const title = "aggregator-safe tool names";
+  const result = (status: CheckStatus, detail: string): CheckResult => ({
+    id, title, pass: status !== "fail", status, detail,
+  });
+
+  const bare = agg.appCalls.filter((c) => c.bare);
+  if (bare.length > 0) {
+    // #745's report is an app calling a SIBLING tool, so name what the host
+    // advertises for the name it actually sent when that tool exists.
+    const advertised = bare[0].advertisedFor ?? agg.advertised;
+    return result(
+      "fail",
+      `app sent tools/call name="${bare[0].name}" but the host advertised "${advertised}" in ` +
+        "hostContext.toolInfo.tool.name; a namespacing aggregator answers -32043 for the bare name " +
+        "and every interaction after mount fails (ext-apps#745, #753)",
+    );
+  }
+  if (agg.appCalls.length === 0) {
+    // Check 6 already reports an app that never called a tool — one cause,
+    // one failure.
+    return result(
+      "skip",
+      "the app never initiated a tools/call, so no name was addressed (see check 6)",
+    );
+  }
+  const calls = `(${agg.appCalls.length} app call(s), 0 bare)`;
+  if (agg.advertised === agg.upstream) {
+    return result("pass",
+      `tool name "${agg.upstream}" already carries the "${agg.separator}" separator, so nothing ` +
+      `was re-prefixed; the app used it as advertised ${calls}`);
+  }
+  // #745 names both routes to the host's name as correct, so say which one.
+  const source = agg.listedViaBridge
+    ? "from tools/list through the bridge"
+    : "from hostContext.toolInfo";
+  return result("pass", `app resolved "${agg.advertised}" ${source} ${calls}`);
+}
+
 export function buildReport(
   state: HarnessState,
   meta: { server: string; tool: string; mode: string },
@@ -339,6 +387,8 @@ export function buildReport(
         ...evaluateProfileChecks(state, profileCtx.profile, profileCtx.windowSec),
       ]
     : evaluateChecks(state);
+  const aggregatorCheck = evaluateAggregatorCheck(state);
+  if (aggregatorCheck) checks.push(aggregatorCheck);
   return {
     ...meta,
     passed: checks.filter((c) => statusOf(c) === "pass").length,

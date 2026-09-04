@@ -15,6 +15,7 @@
  * Everything downstream of listTools() is era-agnostic: host.ts only ever
  * talks to a McpConn.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   Client as StatelessClient,
   StreamableHTTPClientTransport as StatelessStreamableTransport,
@@ -89,6 +90,46 @@ export interface McpConn {
   close(): Promise<void>;
 }
 
+/** Minimal structural view of a transport, so one tap fits both SDK eras. */
+interface SendingTransport {
+  send(message: unknown, options?: unknown): Promise<void>;
+}
+
+/** Box the id of one tools/call travels back in. */
+const toolCallIdBox = new AsyncLocalStorage<{ id?: string | number }>();
+
+/**
+ * Watch a transport's outgoing frames for tools/call request ids. Wrapping
+ * `send` is the only place the id is visible: both clients mint it inside
+ * `request()` and neither returns it.
+ */
+function tapToolCallIds<T>(transport: T): T {
+  const t = transport as T & SendingTransport;
+  const inner = t.send.bind(t);
+  t.send = (message: unknown, options?: unknown) => {
+    const m = message as { method?: string; id?: string | number };
+    const box = toolCallIdBox.getStore();
+    if (box && m?.method === "tools/call" && m.id !== undefined) box.id = m.id;
+    return inner(message, options);
+  };
+  return t;
+}
+
+/**
+ * One tools/call, plus the JSON-RPC id the client actually put on the wire —
+ * what hostContext.toolInfo.id has to carry. The id comes back through an
+ * async-context box rather than a "last id seen" field because the harness
+ * keeps several calls in flight (the redelivery probe and instance #2).
+ */
+export async function callToolWithId(
+  conn: McpConn,
+  params: { name: string; arguments?: Record<string, unknown> },
+): Promise<{ result: Record<string, unknown>; id?: string | number }> {
+  const box: { id?: string | number } = {};
+  const result = await toolCallIdBox.run(box, () => conn.callTool(params));
+  return { result, id: box.id };
+}
+
 export function withTimeout<T>(
   promise: Promise<T>,
   what: string,
@@ -127,11 +168,13 @@ export async function legacyConnect(
 
   if (target.kind === "stdio") {
     client = new LegacyClient(IMPLEMENTATION);
-    const transport = new LegacyStdioTransport({
-      command: target.command,
-      args: target.args,
-      stderr: "inherit", // server logs stay visible — often the only evidence
-    });
+    const transport = tapToolCallIds(
+      new LegacyStdioTransport({
+        command: target.command,
+        args: target.args,
+        stderr: "inherit", // server logs stay visible — often the only evidence
+      }),
+    );
     await withTimeout(client.connect(transport), "stdio MCP handshake");
     transportKind = "stdio";
   } else {
@@ -142,7 +185,9 @@ export async function legacyConnect(
       client = new LegacyClient(IMPLEMENTATION);
       await withTimeout(
         client.connect(
-          new LegacyStreamableTransport(url, hasHeaders ? { requestInit: { headers } } : {}),
+          tapToolCallIds(
+            new LegacyStreamableTransport(url, hasHeaders ? { requestInit: { headers } } : {}),
+          ),
         ),
         "Streamable HTTP connect",
       );
@@ -160,7 +205,10 @@ export async function legacyConnect(
               },
             }
           : {};
-        await withTimeout(client.connect(new SSEClientTransport(url, sseOpts)), "SSE connect");
+        await withTimeout(
+          client.connect(tapToolCallIds(new SSEClientTransport(url, sseOpts))),
+          "SSE connect",
+        );
         transportKind = "sse";
       } catch (sseError) {
         const pathHint =
@@ -242,11 +290,13 @@ export async function statelessClientConnect(
   });
 
   if (target.kind === "stdio") {
-    const transport = new StatelessStdioTransport({
-      command: target.command,
-      args: target.args,
-      stderr: "inherit",
-    });
+    const transport = tapToolCallIds(
+      new StatelessStdioTransport({
+        command: target.command,
+        args: target.args,
+        stderr: "inherit",
+      }),
+    );
     await withTimeout(
       client.connect(transport, opts.prior ? { prior: opts.prior } : undefined),
       "stdio MCP connect (2026-07-28 negotiation)",
@@ -256,9 +306,11 @@ export async function statelessClientConnect(
 
   const headers = target.headers;
   const hasHeaders = Object.keys(headers).length > 0;
-  const transport = new StatelessStreamableTransport(
-    new URL(target.url),
-    hasHeaders ? { requestInit: { headers } } : {},
+  const transport = tapToolCallIds(
+    new StatelessStreamableTransport(
+      new URL(target.url),
+      hasHeaders ? { requestInit: { headers } } : {},
+    ),
   );
   await withTimeout(
     client.connect(transport, opts.prior ? { prior: opts.prior } : undefined),

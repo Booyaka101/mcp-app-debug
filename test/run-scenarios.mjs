@@ -104,6 +104,12 @@ function assertReport(name, code, stdout, expect) {
   for (const id of expect.mustPass) {
     if (!passedIds.includes(id)) problems.push(`expected check "${id}" to PASS, it failed`);
   }
+  for (const id of expect.mustBeAbsent ?? []) {
+    if (report.checks.some((c) => c.id === id)) problems.push(`expected no check "${id}" in the report`);
+  }
+  if (expect.tool !== undefined && report.tool !== expect.tool) {
+    problems.push(`expected the report's tool to be "${expect.tool}", got "${report.tool}"`);
+  }
   for (const [id, substring] of Object.entries(expect.detailContains ?? {})) {
     const check = report.checks.find((c) => c.id === id);
     if (!check) problems.push(`no check "${id}" in report`);
@@ -160,12 +166,12 @@ await scenarioLoop(STATELESS_EXPECTATIONS, { stateless: true, basePort: 3150 });
  *   forced-mismatch    --protocol 2026-07-28 against a legacy fixture → exit 2
  *                      naming what the server actually offers
  */
-async function extraCase(name, cliArgs, { mustFail, mustPass, detailContains, spawnServer }) {
+async function extraCase(name, cliArgs, { spawnServer, ...expect }) {
   const server = spawnServer?.();
   try {
     if (server) await waitForServer(`http://localhost:${server.port}/mcp`);
     const { code, stdout } = await runCli(cliArgs);
-    assertReport(name, code, stdout, { mustFail, mustPass, detailContains });
+    assertReport(name, code, stdout, expect);
   } finally {
     server?.proc.kill();
   }
@@ -475,12 +481,12 @@ function fail(name, problems) {
   for (const p of problems) console.error(`   - ${p}`);
 }
 
-async function profileCase(name, { scenario, port, profile, expect }) {
+async function profileCase(name, { scenario, port, profile, extraArgs = [], expect }) {
   const server = spawn(process.execPath, ["test/profile-server.mjs", scenario, String(port)], { stdio: "ignore" });
   try {
     await waitForServer(`http://localhost:${port}/mcp`);
     const { code, stdout } = await runCli([
-      `http://localhost:${port}/mcp`, "--json", "--profile", profile, "--timeout", "12",
+      `http://localhost:${port}/mcp`, "--json", "--profile", profile, "--timeout", "12", ...extraArgs,
     ]);
     let out;
     try {
@@ -492,11 +498,14 @@ async function profileCase(name, { scenario, port, profile, expect }) {
     const problems = [];
     if (out.verdict !== expect.verdict) problems.push(`expected verdict ${expect.verdict}, got ${out.verdict}`);
     if (code !== expect.exit) problems.push(`expected exit ${expect.exit}, got ${code}`);
-    for (const [checkId, want] of Object.entries(expect.cells ?? {})) {
-      const row = out.matrix.checks.indexOf(checkId);
-      const col = out.matrix.profiles.indexOf(want.profile);
-      const got = row >= 0 && col >= 0 ? out.matrix.cells[row][col] : "(missing)";
-      if (got !== want.cell) problems.push(`expected ${checkId}@${want.profile} = ${want.cell}, got ${got}`);
+    for (const [checkId, wanted] of Object.entries(expect.cells ?? {})) {
+      // an array when one check is asserted in more than one column
+      for (const want of Array.isArray(wanted) ? wanted : [wanted]) {
+        const row = out.matrix.checks.indexOf(checkId);
+        const col = out.matrix.profiles.indexOf(want.profile);
+        const got = row >= 0 && col >= 0 ? out.matrix.cells[row][col] : "(missing)";
+        if (got !== want.cell) problems.push(`expected ${checkId}@${want.profile} = ${want.cell}, got ${got}`);
+      }
     }
     for (const [checkId, substring] of Object.entries(expect.observationContains ?? {})) {
       const ev = out.evidence.filter((e) => e.check === checkId).map((e) => e.observation).join(" || ");
@@ -552,8 +561,10 @@ await profileCase("profile-grok-host-suspect", {
   expect: {
     verdict: "APP-OK-HOST-SUSPECT", exit: 0,
     cells: {
-      "tool-result-redelivery": { profile: "spec", cell: "PASS" },
-      "tool-result-redelivery": { profile: "grok", cell: "FAIL" },
+      "tool-result-redelivery": [
+        { profile: "spec", cell: "PASS" },
+        { profile: "grok", cell: "FAIL" },
+      ],
     },
     observationContains: { "tool-result-redelivery": "ext-apps#750" },
   },
@@ -699,7 +710,149 @@ await profileCase("profile-singleton-skip9", {
 }
 
 /**
- * Unit assertions for the checks 8-10 decision logic. Several branches (a
+ * --aggregator scenarios (check 11). ext-apps#745: behind a namespacing
+ * gateway only the rewritten name resolves, and the bare one is answered
+ * -32043. #753 counts fifteen example apps that hardcode the bare name.
+ */
+const aggregatorCase = (name, { scenario, port, args, expect }) =>
+  extraCase(name, [`http://localhost:${port}/mcp`, "--json", "--timeout", "10", ...args], {
+    ...expect,
+    spawnServer: () => ({
+      port,
+      proc: spawn(process.execPath, ["test/profile-server.mjs", scenario, String(port)], { stdio: "ignore" }),
+    }),
+  });
+
+const ALL_SEVEN = [
+  "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call", "protocol-revision",
+];
+
+await aggregatorCase("aggregator-bare-names", {
+  scenario: "bare-names", port: 3421, args: ["--aggregator"],
+  expect: {
+    mustFail: ["aggregator-safe-tool-names", "tool-call"],
+    mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "protocol-revision"],
+    tool: "alpha__forecast",
+    detailContains: {
+      "aggregator-safe-tool-names":
+        'app sent tools/call name="forecast" but the host advertised "alpha__forecast" in ' +
+        "hostContext.toolInfo.tool.name; a namespacing aggregator answers -32043 for the bare " +
+        "name and every interaction after mount fails (ext-apps#745, #753)",
+    },
+  },
+});
+
+await aggregatorCase("aggregator-resolved-names", {
+  scenario: "resolved-names", port: 3422, args: ["--aggregator"],
+  expect: {
+    mustFail: [],
+    mustPass: [...ALL_SEVEN, "aggregator-safe-tool-names"],
+    tool: "alpha__forecast",
+    detailContains: {
+      "aggregator-safe-tool-names": 'app resolved "alpha__forecast" from hostContext.toolInfo',
+      "tool-call": 'app called "alpha__forecast"',
+    },
+  },
+});
+
+// Aggregation is a deployment shape, not a spec requirement: without the flag
+// the check does not exist and neither app is faulted for its name.
+await aggregatorCase("aggregator-off-bare-names", {
+  scenario: "bare-names", port: 3423, args: [],
+  expect: { mustFail: [], mustPass: ALL_SEVEN, mustBeAbsent: ["aggregator-safe-tool-names"], tool: "forecast" },
+});
+
+await aggregatorCase("aggregator-off-resolved-names", {
+  scenario: "resolved-names", port: 3424, args: [],
+  expect: { mustFail: [], mustPass: ALL_SEVEN, mustBeAbsent: ["aggregator-safe-tool-names"], tool: "forecast" },
+});
+
+// #745's other correct route: the app lists tools through the bridge, which
+// must show the rewritten names.
+await aggregatorCase("aggregator-listed-names", {
+  scenario: "listed-names", port: 3429, args: ["--aggregator"],
+  expect: {
+    mustFail: [],
+    mustPass: [...ALL_SEVEN, "aggregator-safe-tool-names"],
+    detailContains: {
+      "aggregator-safe-tool-names": 'app resolved "alpha__forecast" from tools/list through the bridge',
+    },
+  },
+});
+
+// A tool whose own name already carries the separator must not be prefixed twice.
+await aggregatorCase("aggregator-already-namespaced", {
+  scenario: "namespaced", port: 3425, args: ["--aggregator"],
+  expect: {
+    mustFail: [],
+    mustPass: [...ALL_SEVEN, "aggregator-safe-tool-names"],
+    tool: "alpha__forecast",
+    detailContains: {
+      "aggregator-safe-tool-names": 'tool name "alpha__forecast" already carries the "__" separator',
+    },
+  },
+});
+
+// A custom prefix, and --tool given in either spelling.
+await aggregatorCase("aggregator-custom-prefix", {
+  scenario: "resolved-names", port: 3426, args: ["--aggregator", "gateway.", "--tool", "forecast"],
+  expect: {
+    mustFail: [],
+    mustPass: [...ALL_SEVEN, "aggregator-safe-tool-names"],
+    tool: "gateway.forecast",
+    detailContains: { "aggregator-safe-tool-names": 'app resolved "gateway.forecast"' },
+  },
+});
+
+// The descriptor knob (toolNameRewrite) instead of the flag: the rewrite is on
+// for that profile only, so the matrix rows are the union — and a bare name is
+// APP-FAULT even though the spec baseline never ran the check.
+await profileCase("profile-aggregator-descriptor", {
+  scenario: "bare-names", port: 3427, profile: "test/profiles/aggregator.json",
+  expect: {
+    verdict: "APP-FAULT", exit: 1,
+    cells: {
+      "aggregator-safe-tool-names": [
+        { profile: "aggregator", cell: "FAIL" },
+        // the spec baseline never ran the check, so its cell is empty
+        { profile: "spec", cell: "SKIP" },
+      ],
+    },
+    observationContains: { "aggregator-safe-tool-names": "ext-apps#745, #753" },
+  },
+});
+
+// --profile all --aggregator: eleven rows, and row 11 in matrix.checks.
+await profileCase("profile-all-aggregator-matrix", {
+  scenario: "resolved-names", port: 3428, profile: "all", extraArgs: ["--aggregator"],
+  expect: {
+    verdict: "APP-OK-HOST-SUSPECT", exit: 0,
+    matrixSnapshot: {
+      checks: [
+        "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call",
+        "protocol-revision", "tool-result-redelivery", "multi-instance-isolation",
+        "external-navigation", "aggregator-safe-tool-names",
+      ],
+      profiles: ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"],
+      cells: [
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["PASS", "PASS", "PASS", "PASS", "FAIL"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["INFO", "INFO", "INFO", "INFO", "INFO"],
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
+      ],
+    },
+  },
+});
+
+/**
+ * Unit assertions for the checks 8-11 decision logic. Several branches (a
  * browser-level popup block vs a sandbox-level one, a second instance that
  * mounts but never handshakes) cannot be forced through a real browser
  * reliably, so they are asserted directly against synthetic state.

@@ -10,6 +10,7 @@
 import { Command, InvalidArgumentError } from "commander";
 import { runHostConformance } from "./fixture-server.js";
 import { runDebugHost } from "./host.js";
+import { DEFAULT_AGGREGATOR_PREFIX, UNKNOWN_NAMESPACE_CODE } from "./mcp/aggregator.js";
 import { runProfiled } from "./profile-run.js";
 import { PROFILE_NAMES } from "./profiles/index.js";
 
@@ -51,6 +52,13 @@ program
     "host profile: spec | claude-desktop | claude-web | chatgpt | grok | all, or a path to a " +
       "descriptor .json — adds checks 8-10 and a fault-attribution verdict (non-spec profiles " +
       "run after a spec baseline)",
+  )
+  .option(
+    "--aggregator [prefix]",
+    `simulate a namespacing aggregator in front of the server: every tool is advertised as ` +
+      `"<prefix><name>" and a tools/call carrying the bare name is answered ` +
+      `${UNKNOWN_NAMESPACE_CODE} instead of being fulfilled (ext-apps#745) — adds check 11 ` +
+      `(default prefix: ${DEFAULT_AGGREGATOR_PREFIX})`,
   )
   .option("--tool <name>", "tool to render (default: first tool declaring _meta.ui.resourceUri)")
   .option("--args <json>", "tool arguments as JSON object (default: inputSchema defaults)")
@@ -96,6 +104,11 @@ Checks (evaluated after the observation window):
                                implements server/discover (a MUST); reports whether
                                io.modelcontextprotocol/ui is advertised
 
+With --aggregator (and only then):
+ 11. aggregator-safe tool names  every app-initiated tools/call used the name the
+                               host advertises (hostContext.toolInfo.tool.name or
+                               tools/list), not the bare one an aggregator refuses
+
 Exit codes:
   0  all checks passed
   1  one or more checks failed (or the server exposes no MCP App at all)
@@ -118,6 +131,8 @@ Examples:
   npx mcp-app-debug http://localhost:3001/mcp --tool get-time --click "Get Server Time"
   npx mcp-app-debug http://localhost:3001/mcp --json | jq .
   npx mcp-app-debug http://localhost:3001/mcp --mode 3p
+  npx mcp-app-debug http://localhost:3001/mcp --aggregator
+  npx mcp-app-debug http://localhost:3001/mcp --aggregator gateway. --json
   npx mcp-app-debug http://localhost:3001/mcp --protocol 2026-07-28
   npx mcp-app-debug --header "Authorization: Bearer $TOKEN" https://api.example.com/mcp
   npx mcp-app-debug --stdio -- npx -y @acme/my-mcp-server
@@ -187,9 +202,19 @@ Examples:
       }
     }
 
+    let aggregatorPrefix: string | undefined;
+    if (options.aggregator !== undefined) {
+      aggregatorPrefix =
+        options.aggregator === true ? DEFAULT_AGGREGATOR_PREFIX : String(options.aggregator);
+      if (aggregatorPrefix.trim() === "") {
+        fail(`error: --aggregator needs a non-empty prefix (default: ${DEFAULT_AGGREGATOR_PREFIX})`);
+      }
+    }
+
     const hostOpts = {
       connect,
       protocol: options.protocol,
+      aggregatorPrefix,
       tool: options.tool,
       args: options.args,
       mode,
