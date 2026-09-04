@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.7.0 — 2026-09-04
+
+**The harness omitted a documented `hostContext` field, and so rewarded the
+broken pattern.**
+
+The 2026-01-26 apps spec lists `toolInfo` on `hostContext`, "Metadata of the
+tool call that instantiated the View", carrying the JSON-RPC id of the
+`tools/call` and the tool itself. This harness never sent it. An app written
+the correct way, reading `getHostContext().toolInfo.tool.name`, found nothing
+to read; an app that hardcodes its tool name passed check 6. That is a defect
+on its own, and it is the exact thing two open issues are about:
+[ext-apps#745](https://github.com/modelcontextprotocol/ext-apps/issues/745)
+(2026-08-15) has a gateway exposing an upstream's `get-time` as
+`alpha__get-time`, so the app's `{"method":"tools/call","params":{"name":"get-time"}}`
+comes back `{"error":{"code":-32043,"message":"unknown name \"get-time\": no
+upstream owns this namespace"}}` while the model's call succeeds;
+[ext-apps#753](https://github.com/modelcontextprotocol/ext-apps/issues/753)
+(2026-08-23) counts fifteen official example apps that hardcode bare names,
+`basic-server-*` among them, which is what third parties fork.
+
+### Added
+
+- **`hostContext.toolInfo` on every run**, with or without any flag. Both
+  bridges (the mounted view and check 9's second instance) now hand the app
+  the tool the run resolved. `toolInfo.id` is the real JSON-RPC id the MCP
+  client put on the wire, captured through an async-context box rather than a
+  "last id seen" field, because the redelivery probe and instance #2 are in
+  flight at the same time. It arrives a beat after the handshake, over
+  `ui/notifications/host-context-changed`: this harness mounts the view from
+  `resources/read` and only then simulates the model's `tools/call`, so at
+  `ui/initialize` time the name exists and the id does not.
+- **`--aggregator [prefix]`** (default prefix `alpha__`) puts a namespacing
+  gateway in front of the server. The connection layer advertises every tool
+  as `<prefix><name>`, puts that name in `toolInfo`, and answers an
+  app-initiated `tools/call` carrying the bare name with #745's frame
+  (`-32043`, same message) instead of fulfilling it; the rewritten name is
+  fulfilled as normal. The model-side simulation uses the rewritten name
+  throughout, which is what a real aggregating host holds. A tool whose name
+  already carries the separator is not prefixed twice, and `--tool` is matched
+  in either spelling.
+- **Check 11, `aggregator-safe-tool-names`.** Runs only under `--aggregator`
+  or a descriptor that sets `toolNameRewrite`. Aggregation is a deployment
+  shape, not something the spec asks of an app, so it is not part of a bare
+  `spec` run. PASS when every app-initiated `tools/call` used the advertised
+  name (via `toolInfo`, or via `tools/list` through the bridge, which #745
+  names as the other correct route; the App Bridge has no `listServerTools`,
+  so the harness now answers that request too). FAIL names the offending frame
+  and cites both issues. SKIP when the app never called a tool, since check 6
+  already reports that. A FAIL is `APP-FAULT` wherever it surfaces, including
+  under a non-spec profile: both issues put the fix in the app.
+- **`toolNameRewrite` in the profile descriptor schema**, so a descriptor can
+  model a host that fronts its servers with an aggregator. As with every
+  non-spec knob it must cite its sources, which the existing zod rule already
+  enforces. `--profile all --aggregator` prints an eleven-row matrix and lists
+  the new id in `matrix.checks`.
+- Fixtures: `bare-names` (the #753 shape, the name written into the bundle),
+  `resolved-names` (#753's `resolveToolName()` reading
+  `hostContext.toolInfo.tool.name`), `listed-names` (the same job done with a
+  `tools/list` through the bridge) and `namespaced` (a tool already called
+  `alpha__forecast` upstream) in `test/profile-server.mjs`, plus
+  `test/profiles/aggregator.json`. Nine new suite cases and twenty-two new
+  unit assertions, for 51 scenario assertions and 44 unit assertions in total
+  (the 40 quoted in the 0.6.0 notes undercounted the same suite by two; it has
+  printed 42 scenario `ok` lines since that release).
+
+### Unchanged by design
+
+- A run without `--aggregator` reports exactly what 0.6.1 reported: verified
+  by diffing the `--json` report against a 0.6.1 baseline captured before the
+  first edit (identical once timings are normalised). The only difference on
+  the wire is the `toolInfo` the harness owed the app all along: one
+  `ui/notifications/host-context-changed` frame in the protocol log.
+- Host mode, `--profile all` artefact suffixing and the per-profile
+  video/log behaviour are untouched.
+
 ## 0.6.1 — 2026-08-28
 
 **A rejected `ui/initialize` is no longer a PASS.**

@@ -1,5 +1,6 @@
 /**
- * Unit tests for the checks 8-10 decision logic (src/checks.ts).
+ * Unit tests for the checks 8-11 decision logic (src/checks.ts) and the
+ * aggregator name mapping (src/mcp/aggregator.ts).
  *
  * The scenario suite drives these through a real browser, which covers the
  * paths a real server can produce — but several branches cannot be forced
@@ -10,7 +11,17 @@
  *
  * Run: npx tsx test/checks-unit.ts   (also runs as part of `npm test`)
  */
-import { evaluateChecks, evaluateProfileChecks, statusOf } from "../src/checks.js";
+import {
+  evaluateAggregatorCheck,
+  evaluateChecks,
+  evaluateProfileChecks,
+  statusOf,
+} from "../src/checks.js";
+import {
+  createAggregator,
+  DEFAULT_AGGREGATOR_PREFIX,
+  UnknownNamespaceError,
+} from "../src/mcp/aggregator.js";
 import type { ProfileDescriptor } from "../src/profiles/index.js";
 import type { CheckResult, HarnessState } from "../src/types.js";
 
@@ -210,6 +221,125 @@ check("10 fail blames the SANDBOX when the console named it",
 check("10 fail blames the BROWSER when no sandbox message was seen",
   { navProbe: { popupsAllowed: true, windowOpen: "blocked", anchor: "blocked", sandboxConsoleSeen: false } },
   "external-navigation", "fail", "not by the sandbox — a browser-level popup block", POPUPS_OK);
+
+/* --------------------------------------- 11 aggregator-safe tool names */
+
+const AGG = {
+  prefix: "alpha__",
+  separator: "__",
+  advertised: "alpha__get-weather",
+  upstream: "get-weather",
+  listedViaBridge: false,
+};
+
+function aggCheck(
+  name: string,
+  aggregator: HarnessState["aggregator"],
+  expectStatus: string,
+  expectSubstring: string,
+): void {
+  const merged = { ...baseState(), aggregator } as HarnessState;
+  const result = evaluateAggregatorCheck(merged);
+  assertCheck(name, result ? [result] : [], "aggregator-safe-tool-names", expectStatus, expectSubstring);
+}
+
+// Without a rewrite the check does not exist at all — aggregation is a
+// deployment shape, so it must not appear on a bare spec run.
+{
+  const absent = evaluateAggregatorCheck(baseState());
+  if (absent !== null) {
+    failures++;
+    console.error("FAIL unit: 11 is not evaluated without --aggregator");
+    console.error(`   - expected null, got ${JSON.stringify(absent)}`);
+  } else {
+    console.log("ok   unit: 11 is not evaluated without --aggregator");
+  }
+}
+
+// SKIP, not a second failure: check 6 already reports an app that never called.
+aggCheck("11 skip when the app never initiated a tools/call",
+  { ...AGG, appCalls: [] },
+  "skip", "the app never initiated a tools/call");
+
+aggCheck("11 fail names the bare frame and both issues",
+  { ...AGG, appCalls: [{ name: "get-weather", bare: true }] },
+  "fail",
+  'app sent tools/call name="get-weather" but the host advertised "alpha__get-weather" in ' +
+    "hostContext.toolInfo.tool.name; a namespacing aggregator answers -32043 for the bare name " +
+    "and every interaction after mount fails (ext-apps#745, #753)");
+
+// ext-apps#745's own report is an app calling a SIBLING tool on the same
+// server, so the message names what the host advertises for THAT name.
+aggCheck("11 fail names the sibling tool the app asked for",
+  { ...AGG, appCalls: [{ name: "get-time", bare: true, advertisedFor: "alpha__get-time" }] },
+  "fail", 'app sent tools/call name="get-time" but the host advertised "alpha__get-time"');
+
+aggCheck("11 fail even when a later call used the right name",
+  {
+    ...AGG,
+    appCalls: [{ name: "alpha__get-weather", bare: false }, { name: "get-weather", bare: true }],
+  },
+  "fail", 'app sent tools/call name="get-weather"');
+
+aggCheck("11 pass counts the app's calls",
+  {
+    ...AGG,
+    appCalls: [
+      { name: "alpha__get-weather", bare: false },
+      { name: "alpha__get-weather", bare: false },
+    ],
+  },
+  "pass", 'app resolved "alpha__get-weather" from hostContext.toolInfo (2 app call(s), 0 bare)');
+
+// ext-apps#745 names tools/list as the other correct route, so say which one
+// the app actually took.
+aggCheck("11 pass credits tools/list when the app listed through the bridge",
+  { ...AGG, listedViaBridge: true, appCalls: [{ name: "alpha__get-weather", bare: false }] },
+  "pass", 'app resolved "alpha__get-weather" from tools/list through the bridge');
+
+aggCheck("11 pass when the upstream name already carried the separator",
+  {
+    ...AGG,
+    advertised: "alpha__get-weather",
+    upstream: "alpha__get-weather",
+    appCalls: [{ name: "alpha__get-weather", bare: false }],
+  },
+  "pass", 'tool name "alpha__get-weather" already carries the "__" separator');
+
+/* ------------------------------------------- aggregator name mapping */
+
+function assertAggregator(name: string, actual: unknown, expected: unknown): void {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    failures++;
+    console.error(`FAIL unit: ${name}`);
+    console.error(`   - expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  } else {
+    console.log(`ok   unit: ${name}`);
+  }
+}
+
+{
+  const agg = createAggregator(DEFAULT_AGGREGATOR_PREFIX, ["get-weather", "alpha__already"]);
+  assertAggregator("aggregator prefixes a bare name", agg.advertise("get-weather"), "alpha__get-weather");
+  assertAggregator("aggregator does not double-prefix", agg.advertise("alpha__already"), "alpha__already");
+  assertAggregator("aggregator derives the separator from the prefix", agg.separator, "__");
+  assertAggregator("aggregator resolves an advertised name", agg.upstream("alpha__get-weather"), "get-weather");
+  // The #745 failure: the bare name belongs to no namespace the gateway owns.
+  assertAggregator("aggregator owns no bare name", agg.upstream("get-weather"), undefined);
+  assertAggregator("aggregator rejects an unknown name", agg.upstream("alpha__nope"), undefined);
+  assertAggregator("aggregator recognises what it advertises", agg.isAdvertised("alpha__get-weather"), true);
+
+  const dotted = createAggregator("gateway.", ["get-weather"]);
+  assertAggregator("a dotted prefix separates on the dot", dotted.advertise("get-weather"), "gateway.get-weather");
+  assertAggregator("a dotted prefix keeps its separator", dotted.separator, ".");
+}
+
+{
+  const err = new UnknownNamespaceError("get-weather");
+  assertAggregator("the refusal carries the #745 code", err.code, -32043);
+  assertAggregator("the refusal carries the #745 message", err.message,
+    'unknown name "get-weather": no upstream owns this namespace');
+}
 
 /* ------------------------------------------------------------ totals */
 

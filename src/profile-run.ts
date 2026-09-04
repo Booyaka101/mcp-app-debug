@@ -76,22 +76,30 @@ interface MatrixJson {
   cells: string[][];
 }
 
+/** Rows are the union of the profiles' checks, in first-seen order: a
+ * descriptor can carry `toolNameRewrite` while the spec baseline does not, so
+ * the columns need not agree on the row list. */
 function buildMatrix(results: ProfileRunResult[]): MatrixJson {
-  const checks = results[0].report.checks.map((c) => c.id);
+  const checks: string[] = [];
+  for (const r of results) {
+    for (const c of r.report.checks) if (!checks.includes(c.id)) checks.push(c.id);
+  }
   return {
     checks,
     profiles: results.map((r) => r.name),
-    cells: checks.map((id, row) =>
+    cells: checks.map((id) =>
       results.map((r) => {
-        const check = r.report.checks[row];
-        return check && check.id === id ? cellOf(check) : "SKIP";
+        const check = r.report.checks.find((c) => c.id === id);
+        return check ? cellOf(check) : "SKIP";
       }),
     ),
   };
 }
 
 function printMatrix(results: ProfileRunResult[], matrix: MatrixJson): void {
-  const labels = results[0].report.checks.map((c, i) => `${i + 1} ${c.title}`);
+  const titles = new Map<string, string>();
+  for (const r of results) for (const c of r.report.checks) titles.set(c.id, c.title);
+  const labels = matrix.checks.map((id, i) => `${i + 1} ${titles.get(id) ?? id}`);
   const labelWidth = Math.max(...labels.map((l) => l.length)) + 2;
   const colWidth = Math.max(...matrix.profiles.map((p) => p.length), 4) + 2;
   process.stdout.write("\n" + " ".repeat(labelWidth));
@@ -113,6 +121,22 @@ function computeVerdict(results: ProfileRunResult[]): { verdict: Verdict; line: 
       line:
         `VERDICT: APP-FAULT — ${specFails.map((c) => c.title).join(", ")} fail(s) under the ` +
         "spec profile; fix the app/server before suspecting any host",
+    };
+  }
+  // A bare tool name is the app's defect wherever it surfaces: ext-apps#745 and
+  // #753 both put the fix in the app, and the check only runs where a rewrite
+  // is active — which the spec profile never is on its own.
+  const bareNames = results.filter((r) =>
+    r.report.checks.some((c) => c.id === "aggregator-safe-tool-names" && statusOf(c) === "fail"),
+  );
+  if (bareNames.length > 0) {
+    return {
+      verdict: "APP-FAULT",
+      line:
+        `VERDICT: APP-FAULT — aggregator-safe tool names fail(s) under ${bareNames
+          .map((r) => r.name)
+          .join(", ")}; the app must read the tool name the host advertises ` +
+        "(ext-apps#745, #753)",
     };
   }
   const suspect: string[] = [];
@@ -162,6 +186,10 @@ function buildEvidence(results: ProfileRunResult[]): Array<{
     "multi-instance-isolation": (e) =>
       e.instance === 2 || e.marker === "cross-instance-leak" || e.marker === "instance2-skipped",
     "external-navigation": (e) => e.method === "external-navigation probe",
+    "aggregator-safe-tool-names": (e) =>
+      e.method?.startsWith("tools/call") === true ||
+      e.method?.startsWith("tools/list") === true ||
+      e.method?.startsWith("aggregator refused") === true,
   };
   const evidence: ReturnType<typeof buildEvidence> = [];
   for (const r of results) {
@@ -203,6 +231,8 @@ export async function runProfiled(base: HostOptions, profileArg: string): Promis
     const out = await runScanOnce({
       ...base,
       profile: descriptor,
+      // a descriptor that models an aggregating host overrides the flag
+      aggregatorPrefix: descriptor.toolNameRewrite ?? base.aggregatorPrefix,
       video: base.video && multi ? suffixPath(base.video, descriptor.name) : base.video,
       screenshot:
         base.screenshot && multi ? suffixPath(base.screenshot, descriptor.name) : base.screenshot,

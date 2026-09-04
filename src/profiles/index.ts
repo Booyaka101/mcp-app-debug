@@ -28,6 +28,10 @@ export const ProfileDescriptorSchema = z.object({
   redeliversToolResult: z.boolean(),
   maxConcurrentInstances: z.number().int().min(1),
   honoursUiDomain: z.boolean(),
+  /** the host fronts its servers with a namespacing aggregator, advertising
+   * every tool as `<prefix><name>` (ext-apps#745, #753) — enables check 11.
+   * Absent or null means no rewrite, and `--aggregator` then decides. */
+  toolNameRewrite: z.string().min(1).nullable().optional(),
   sources: z
     .array(z.url())
     .min(1, "sources must cite at least one URL — a profile without evidence is not loaded"),

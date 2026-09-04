@@ -17,6 +17,17 @@
  *   noargs      tool takes no arguments at all      → check 8 SKIPs honestly
  *   singleton   the ui:// resource can only be read ONCE; the second
  *               resources/read errors                → check 9 SKIPs honestly
+ *   bare-names  the ext-apps#753 shape: the tool name is written into the
+ *               bundle, so behind an aggregator the app calls a name no
+ *               upstream owns            → check 11 FAILs under --aggregator
+ *   resolved-names  the resolveToolName() pattern from ext-apps#753: the name
+ *               comes from hostContext.toolInfo.tool.name in the ui/initialize
+ *               result                   → check 11 PASSes with and without it
+ *   listed-names  the other route ext-apps#745 calls correct: the app sends
+ *               tools/list through the bridge and calls the name it finds
+ *                                                       → check 11 PASSes
+ *   namespaced  the tool is already called "alpha__forecast" upstream, so an
+ *               aggregator must not prefix it twice     → check 11 PASSes
  *
  * Add --stdio to serve over stdio instead of HTTP (port ignored).
  */
@@ -31,7 +42,10 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 
-const SCENARIOS = ["weather", "first-only", "leak", "popup", "noargs", "singleton"];
+const SCENARIOS = [
+  "weather", "first-only", "leak", "popup", "noargs", "singleton",
+  "bare-names", "resolved-names", "listed-names", "namespaced",
+];
 const stdioMode = process.argv.includes("--stdio");
 const argv = process.argv.slice(2).filter((a) => a !== "--stdio");
 const scenario = argv[0] ?? "weather";
@@ -41,11 +55,14 @@ if (!SCENARIOS.includes(scenario)) {
 }
 const port = Number(argv[1] ?? 3009);
 
+// namespaced: the upstream name already carries the separator.
+const TOOL_NAME = scenario === "namespaced" ? "alpha__forecast" : "forecast";
+
 let calls = 0;
 let resourceReads = 0;
 const SEEDED_CITIES = new Set(["Tokyo", "Kyoto", "Osaka"]);
 
-function appHtml({ leak = false, popup = false } = {}) {
+function appHtml({ leak = false, popup = false, resolve = false, list = false } = {}) {
   return `<!doctype html>
 <html><head><meta charset="utf-8"></head>
 <body><h3 style="font-family:sans-serif">profile-server app (${scenario})</h3>
@@ -79,15 +96,35 @@ function appHtml({ leak = false, popup = false } = {}) {
     pending.set(id, resolve);
     post({ jsonrpc: "2.0", id, method, params });
   });
+  ${resolve ? `
+  // ext-apps#753's resolveToolName: whatever prefix the host applied to the
+  // tool that instantiated this view is the prefix its own calls need.
+  const resolveToolName = (baseName, hostContext) => {
+    const invoked = hostContext && hostContext.toolInfo && hostContext.toolInfo.tool
+      ? hostContext.toolInfo.tool.name : undefined;
+    if (!invoked || invoked === baseName) return baseName;
+    return invoked.endsWith(baseName)
+      ? invoked.slice(0, invoked.length - baseName.length) + baseName
+      : baseName;
+  };` : ""}
   (async () => {
-    await request("ui/initialize", {
+    const init = await request("ui/initialize", {
       protocolVersion: "2026-01-26",
       appInfo: { name: "profile-app", version: "1.0.0" },
       appCapabilities: {},
     });
     post({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} });
     ${popup ? `window.open("https://example.com/", "_blank");` : ""}
-    await request("tools/call", { name: "forecast", arguments: { city: "Kyoto" } });
+    // ext-apps#753: writing the name into the bundle is the defect. Reading it
+    // from hostContext, or from tools/list, is the fix. All three spellings
+    // work on a direct connection, which is why the bug hides until a gateway.
+    const toolName = ${
+      resolve
+        ? `resolveToolName(${JSON.stringify(TOOL_NAME)}, init && init.result ? init.result.hostContext : undefined)`
+      : list
+        ? `((await request("tools/list", {})).result?.tools?.[0]?.name ?? ${JSON.stringify(TOOL_NAME)})`
+        : JSON.stringify(TOOL_NAME)};
+    await request("tools/call", { name: toolName, arguments: { city: "Kyoto" } });
   })();
 </script></body></html>`;
 }
@@ -98,7 +135,7 @@ function buildServer() {
 
   registerAppTool(
     server,
-    "forecast",
+    TOOL_NAME,
     {
       title: "Forecast",
       description: "Returns a forecast for a city.",
@@ -123,7 +160,12 @@ function buildServer() {
     },
   );
 
-  const html = appHtml({ leak: scenario === "leak", popup: scenario === "popup" });
+  const html = appHtml({
+    leak: scenario === "leak",
+    popup: scenario === "popup",
+    resolve: scenario === "resolved-names",
+    list: scenario === "listed-names",
+  });
   registerAppResource(server, uri, uri, { mimeType: RESOURCE_MIME_TYPE }, async () => {
     resourceReads++;
     // singleton: the view can be fetched once and never again, so a host

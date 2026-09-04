@@ -23,8 +23,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     # The suite drives a real browser once per scenario; profile cases run the
     # scan twice (spec baseline + named profile) and --profile all runs it five
-    # times, so it needs more headroom than the 7-check era.
-    timeout-minutes: 40
+    # times, so it needs more headroom than the 7-check era. The ceiling is set
+    # by Windows, where `npm ci` and each `npx ./pkg.tgz` cost ~6 minutes apiece
+    # on top of an 11-minute suite. 0.7.0 hit the old 40 exactly.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -58,4 +60,29 @@ jobs:
             if (r.verdict !== 'APP-OK-HOST-SUSPECT') throw new Error('expected APP-OK-HOST-SUSPECT, got ' + r.verdict);
             if (r.matrix.cells[row].join() !== 'PASS,FAIL') throw new Error('expected check 8 PASS,FAIL got ' + r.matrix.cells[row].join());
             console.log('tarball profile smoke test OK:', r.verdict);
+          "
+      - name: Smoke-test aggregator mode from the packed tarball
+        # Linux only. Unlike the profile descriptors, aggregator mode ships no
+        # file of its own (it is bundled into dist/cli.js), so this proves the
+        # published bundle rather than the packing, and a third npx install is
+        # not worth six more minutes on the Windows runner.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # ext-apps#745 from the published bundle: an app that hardcodes its
+          # tool name must fail check 11 and exit 1 behind the gateway.
+          node test/profile-server.mjs bare-names 3125 &
+          sleep 3
+          set +e
+          npx -y ./mcp-app-debug-*.tgz http://localhost:3125/mcp --aggregator --json --timeout 12 > aggregator.json
+          code=$?
+          set -e
+          node -e "
+            const r = JSON.parse(require('fs').readFileSync('aggregator.json', 'utf8').replace(/^﻿/, ''));
+            const c = r.checks.find((x) => x.id === 'aggregator-safe-tool-names');
+            if (!c) throw new Error('no aggregator check in the report');
+            if (c.pass) throw new Error('expected check 11 to FAIL, got: ' + c.detail);
+            if (r.tool !== 'alpha__forecast') throw new Error('expected the rewritten tool name, got ' + r.tool);
+            if ($code !== 1) throw new Error('expected exit 1, got $code');
+            console.log('tarball aggregator smoke test OK:', c.detail);
           "

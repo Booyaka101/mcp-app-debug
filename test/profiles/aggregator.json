@@ -1,0 +1,20 @@
+{
+  "name": "aggregator",
+  "description": "test fixture: spec knobs plus a namespacing gateway in front of the server, advertising every tool as alpha__<name> (ext-apps#745, #753)",
+  "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
+  "csp": {
+    "frameAncestors": "'self'",
+    "scriptSrc": "'self' 'unsafe-inline' blob: data:",
+    "defaultSrc": "'self' 'unsafe-inline'",
+    "objectSrc": "'self' 'unsafe-inline'"
+  },
+  "popupsAllowed": false,
+  "redeliversToolResult": true,
+  "maxConcurrentInstances": 2,
+  "honoursUiDomain": true,
+  "toolNameRewrite": "alpha__",
+  "sources": [
+    "https://github.com/modelcontextprotocol/ext-apps/issues/745",
+    "https://github.com/modelcontextprotocol/ext-apps/issues/753"
+  ]
+}
