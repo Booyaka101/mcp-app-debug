@@ -1,5 +1,100 @@
 # Changelog
 
+## 0.8.0 — 2026-09-13
+
+**Check 2 reads the CSP. Check 12 tries it.**
+
+The CSP check has always been passive: serve the sandbox with the policy a
+conformant host builds from your `_meta.ui.csp`, then fail if the app trips a
+`securitypolicyviolation` while it renders. That catches an app that reaches
+somewhere it never declared. It cannot catch the opposite, which is the harder
+bug: you declared the origin correctly, the host dropped your declaration, and
+your images and API calls are blocked on that host while everything looks green
+here.
+
+[ext-apps#761](https://github.com/modelcontextprotocol/ext-apps/issues/761)
+(open, 2026-08-28) is that bug. claude.ai's sandbox proxy destructures only
+`{html, permissions}` out of the resource and never reads `csp`, so the
+`resourceDomains` you declared never reach the policy the sandbox is served
+with. The proxy document goes out with a fixed header. Nothing in the app is
+wrong and nothing loads.
+
+### Added
+
+- **Check 12, `declared CSP origins reachable`** (profile mode). After
+  `ui/ready` the harness injects a probe into the sandbox: an `<img>` per
+  `_meta.ui.csp.resourceDomains` origin and a `fetch()` per `connectDomains`
+  origin, each to `<origin>/__mcp-app-debug-probe`. A Playwright route answers
+  every one of them with `204` locally, so **no probe traffic leaves the
+  machine**. The check is about the policy, not about whether the origin is up.
+  Every probe request is accounted for as attempted, answered locally, or
+  stopped by CSP before a socket was opened, and `npm test` asserts the
+  leftover is zero on both a passing and a failing run. A request that reaches
+  the route is reachable; a `securitypolicyviolation` naming the origin means
+  the sandbox stopped it before any request was made. 2 s per origin,
+  fire-and-forget, so checks 1-11 are never delayed by it.
+- **`appliesResourceCsp` on profile descriptors** (default `true`, so
+  descriptors written before 0.8.0 load unchanged). `false` models #761: the
+  `resourceDomains`/`connectDomains` tails are dropped from the header the
+  sandbox is served with, and the sandbox gets the host's own policy only. Set
+  `false` on `claude-web`, which now cites #761 in its `sources`.
+- **A blocking failure exits non-zero even when the verdict absolves the app.**
+  Check 12 failing under a profile that drops `_meta.ui.csp` still reads
+  `APP-OK-HOST-SUSPECT`, because the fix is an issue on the host rather than a
+  change to your app. The app still does not work there, so CI must not go
+  green. Check 8 under `grok` is withheld by the descriptor for every app and
+  stays exit `0`. Such a failure carries `"blocking": true` on its `evidence` entry in the
+  JSON report.
+- Five fixtures in `test/profile-server.mjs`: `csp-origins` (one origin in
+  each list, so check 12 PASSes under `spec` and FAILs under `claude-web`),
+  `csp-wildcard` (a wildcard, a duplicate, and a schemeless host), `csp-paths`
+  (a path prefix and an exact file), `csp-self-asset`, whose app really
+  loads an image from the one origin it declared, served by the fixture itself
+  so nothing leaves the machine, and `csp-unmatchable`. Under `claude-web` the
+  self-asset run has check 2 FAIL on the app's `/asset.png` and check 12 FAIL
+  on `/__mcp-app-debug-probe`, separately, which is what keeps the probe from
+  masking a real block.
+- Check 12 catches a declaration no browser can match. A source expression
+  carrying userinfo (`https://user@cdn.example.com`) parses, survives the
+  official sanitizer, and then matches nothing at all, so the origin is dead
+  on every host including a conformant one. That fails under `spec`, where
+  there is no host knob to blame, and the detail line says so.
+
+### Changed
+
+- Checks are numbered from their id rather than their position in the report.
+  Check 11 only exists when a tool-name rewrite is active, so positional
+  numbering would have printed check 12 as "11" on a run without one.
+- `--profile all` prints eleven rows, twelve with `--aggregator`.
+
+### Notes
+
+- `_meta.ui.csp` with both lists empty, or absent entirely, SKIPs. There is
+  nothing to probe, and that is not a failure.
+- Wildcards are probed at a synthetic subdomain (`https://*.example.com` →
+  `https://mcp-app-debug-probe.example.com`) and the detail line says so.
+  Entries CSP accepts as source expressions but that nothing can be requested
+  from (`cdn.example.com`, `*`, `https:`) are reported as unprobeable rather
+  than counted as blocked. Duplicates are probed once per list; the same origin
+  in both lists is probed twice, because `img-src` can allow what `connect-src`
+  does not.
+- A source expression's path is part of the match, which is easy to forget.
+  `img-src https://cdn.example.com/assets/` does not allow a request to the
+  origin root, so an entry ending in `/` is probed under its own prefix. An
+  entry naming an exact file is reported as unprobeable, because the only
+  request that could match it is a real request for that real file, and this
+  tool does not put one on the wire.
+- A probe that reaches no verdict inside its window reports `INFO`. A loaded
+  machine says nothing either way about the declaration, and failing CI on it
+  would be worse than saying nothing.
+- Check 2 is unchanged. The violations the probe provokes on purpose are its
+  own evidence and are filtered out of check 2 by the probe path, so an app
+  that was green on 0.7.0 is green on 0.8.0 and an app that genuinely gets
+  blocked loading something from an origin it declared still FAILs check 2.
+- `frameDomains` and `baseUriDomains` are still applied when
+  `appliesResourceCsp` is `false`. #761 is specific to the two tails check 12
+  probes, and there is no evidence either way on the other two.
+
 ## 0.7.0 — 2026-09-04
 
 **The harness omitted a documented `hostContext` field, and so rewarded the

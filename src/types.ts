@@ -1,6 +1,7 @@
 /**
  * Shared types between the Node CLI/harness and the browser-side host page.
  */
+import type { CspProbeTarget } from "./csp.js";
 
 /** One row in the protocol log (side panel + Node collection). */
 export interface LogEntry {
@@ -33,6 +34,9 @@ export interface LogEntry {
   data?: Record<string, unknown>;
   /** which app instance the entry belongs to (profile mode only; 1 when absent) */
   instance?: number;
+  /** the harness provoked this entry with a check-12 probe, so it is check 12's
+   * evidence and not the app's. Classified once, on the way into the log. */
+  probe?: boolean;
 }
 
 /** Config served to the host page at GET /config. */
@@ -112,7 +116,8 @@ export interface CheckResult {
     | "tool-result-redelivery"
     | "multi-instance-isolation"
     | "external-navigation"
-    | "aggregator-safe-tool-names";
+    | "aggregator-safe-tool-names"
+    | "resource-csp-effective";
   title: string;
   pass: boolean;
   detail: string;
@@ -120,7 +125,30 @@ export interface CheckResult {
   ms?: number;
   /** four-state outcome, set in profile mode; absent means pass/fail only */
   status?: CheckStatus;
+  /** the app is correct and still does not work on this host, so the run exits
+   * non-zero even when the verdict absolves the app (see profile-run.ts) */
+  blocking?: boolean;
 }
+
+/**
+ * Display number per check id. Positional numbering would renumber check 12 as
+ * 11 on a run without a tool-name rewrite, so the number is a property of the
+ * check rather than of its row.
+ */
+export const CHECK_NUMBERS: Record<CheckResult["id"], number> = {
+  "resource-uri": 1,
+  csp: 2,
+  "ui-domain": 3,
+  "ui-initialize": 4,
+  "ui-ready": 5,
+  "tool-call": 6,
+  "protocol-revision": 7,
+  "tool-result-redelivery": 8,
+  "multi-instance-isolation": 9,
+  "external-navigation": 10,
+  "aggregator-safe-tool-names": 11,
+  "resource-csp-effective": 12,
+};
 
 export interface CheckReport {
   server: string;
@@ -209,6 +237,33 @@ export interface HarnessState {
     appCalls: Array<{ name: string; bare: boolean; advertisedFor?: string }>;
     /** the app listed tools through the bridge, so it could derive names there */
     listedViaBridge: boolean;
+  };
+  /** check 12 — reachability of the origins the server declared in
+   * _meta.ui.csp, probed from inside the sandbox */
+  cspProbe?: {
+    /** the probe has not settled yet — checks 1-11 never wait on it */
+    pending: boolean;
+    /** the active profile folds _meta.ui.csp into the sandbox policy */
+    appliesResourceCsp: boolean;
+    /** set when there was nothing to probe, or the probe could not run */
+    skipped?: string;
+    results: Array<
+      CspProbeTarget & {
+        /** allowed = the local route answered it; blocked = CSP stopped it first */
+        outcome: "allowed" | "blocked" | "unknown";
+        /** the directive the browser named in the securitypolicyviolation */
+        directive?: string;
+      }
+    >;
+    /** _meta.ui.csp entries no interceptable request can be derived from */
+    invalid: string[];
+    /** probeable entries dropped because the declared list was over the cap */
+    capped: number;
+    /** probe requests the page attempted, answered locally, and stopped by CSP
+     * before a socket was opened; anything left over escaped to the network */
+    requestsSeen: number;
+    requestsFulfilled: number;
+    requestsBlocked: number;
   };
   /** check 10 — external-navigation probe from inside the sandbox */
   navProbe?: {

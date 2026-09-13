@@ -114,6 +114,9 @@ const PROFILE_CHECK_TITLES: Array<[string, string]> = [
 /** Chip 11 exists only when a tool-name rewrite is active. */
 const AGGREGATOR_CHECK_TITLE: [string, string] = ["aggregator-safe-tool-names", "tool names"];
 
+/** Chip 12 exists only when a profile is active — it probes that profile's CSP. */
+const CSP_PROBE_CHECK_TITLE: [string, string] = ["resource-csp-effective", "CSP origins"];
+
 function el(tag: string, attrs: Record<string, string> = {}, text?: string): HTMLElement {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
@@ -148,6 +151,7 @@ function buildPanel(config: HarnessConfig): void {
     ...CHECK_TITLES,
     ...(config.profile ? PROFILE_CHECK_TITLES : []),
     ...(config.aggregatorPrefix ? [AGGREGATOR_CHECK_TITLE] : []),
+    ...(config.profile ? [CSP_PROBE_CHECK_TITLE] : []),
   ];
   for (const [id, label] of chipList) {
     const chip = el("div", { class: "chip", id: `chip-${id}`, title: "pending…" });

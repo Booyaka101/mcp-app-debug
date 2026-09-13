@@ -84,6 +84,24 @@ function runCli(args) {
   });
 }
 
+// A fixture must not outlive the runner, or the next run cannot bind its port.
+// `finally { server.kill() }` does not run on Ctrl-C; this does.
+const children = new Set();
+
+function spawnFixture(args, options = { stdio: "ignore" }) {
+  const proc = spawn(process.execPath, args, options);
+  children.add(proc);
+  proc.once("exit", () => children.delete(proc));
+  return proc;
+}
+
+process.once("exit", () => {
+  for (const proc of children) proc.kill();
+});
+for (const signal of ["SIGINT", "SIGTERM", "SIGBREAK", "SIGHUP"]) {
+  process.once(signal, () => process.exit(130));
+}
+
 let failures = 0;
 
 function assertReport(name, code, stdout, expect) {
@@ -135,7 +153,7 @@ async function scenarioLoop(expectations, { stateless, basePort }) {
     port++;
     const serverArgs = ["test/broken-server.mjs", scenario, String(port)];
     if (stateless) serverArgs.push("--stateless");
-    const server = spawn(process.execPath, serverArgs, { stdio: "ignore" });
+    const server = spawnFixture(serverArgs);
     try {
       await waitForServer(`http://localhost:${port}/mcp`);
       const { code, stdout } = await runCli([
@@ -185,7 +203,7 @@ await extraCase(
     mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "protocol-revision"],
     spawnServer: () => ({
       port: 3097,
-      proc: spawn(process.execPath, ["test/broken-server.mjs", "ok", "3097"], { stdio: "ignore" }),
+      proc: spawnFixture(["test/broken-server.mjs", "ok", "3097"]),
     }),
   },
 );
@@ -218,7 +236,7 @@ await extraCase(
     mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"],
     spawnServer: () => ({
       port: 3098,
-      proc: spawn(process.execPath, ["test/broken-server.mjs", "ok", "3098", "--stateless"], { stdio: "ignore" }),
+      proc: spawnFixture(["test/broken-server.mjs", "ok", "3098", "--stateless"]),
     }),
   },
 );
@@ -226,7 +244,7 @@ await extraCase(
 // forced revision the server does not support → operational error (exit 2)
 // with a message naming what the server actually offers, and no JSON report.
 {
-  const proc = spawn(process.execPath, ["test/broken-server.mjs", "ok", "3099"], { stdio: "ignore" });
+  const proc = spawnFixture(["test/broken-server.mjs", "ok", "3099"]);
   try {
     await waitForServer("http://localhost:3099/mcp");
     const { code, stdout, stderr } = await runCli([
@@ -266,7 +284,7 @@ await extraCase(
  *                     revisions → the fixture says so on stderr
  */
 function spawnCollect(nodeArgs) {
-  const proc = spawn(process.execPath, nodeArgs, { stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawnFixture(nodeArgs, { stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
   proc.stdout.on("data", (d) => (stdout += d));
@@ -482,7 +500,7 @@ function fail(name, problems) {
 }
 
 async function profileCase(name, { scenario, port, profile, extraArgs = [], expect }) {
-  const server = spawn(process.execPath, ["test/profile-server.mjs", scenario, String(port)], { stdio: "ignore" });
+  const server = spawnFixture(["test/profile-server.mjs", scenario, String(port)]);
   try {
     await waitForServer(`http://localhost:${port}/mcp`);
     const { code, stdout } = await runCli([
@@ -507,9 +525,22 @@ async function profileCase(name, { scenario, port, profile, extraArgs = [], expe
         if (got !== want.cell) problems.push(`expected ${checkId}@${want.profile} = ${want.cell}, got ${got}`);
       }
     }
-    for (const [checkId, substring] of Object.entries(expect.observationContains ?? {})) {
-      const ev = out.evidence.filter((e) => e.check === checkId).map((e) => e.observation).join(" || ");
-      if (!ev.includes(substring)) problems.push(`expected ${checkId} evidence to contain ${JSON.stringify(substring)}, got: ${ev.slice(0, 300)}`);
+    // observationContains reads the check's own detail line; rawContains reads
+    // the protocol log the evidence block carries for it.
+    const EVIDENCE_TEXT = {
+      observationContains: (es) => es.map((e) => e.observation).join(" || "),
+      rawContains: (es) => es.flatMap((e) => e.rawMessages).join(" || "),
+    };
+    for (const [key, extract] of Object.entries(EVIDENCE_TEXT)) {
+      for (const [checkId, substring] of Object.entries(expect[key] ?? {})) {
+        const text = extract(out.evidence.filter((e) => e.check === checkId));
+        if (!text.includes(substring)) problems.push(`expected ${checkId} ${key} to contain ${JSON.stringify(substring)}, got: ${text.slice(0, 300)}`);
+      }
+    }
+    // the machine-readable reason an APP-OK-HOST-SUSPECT run still exits 1
+    for (const [checkId, want] of Object.entries(expect.blocking ?? {})) {
+      const got = out.evidence.some((e) => e.check === checkId && e.profile === want.profile && e.blocking === true);
+      if (got !== want.blocking) problems.push(`expected ${checkId}@${want.profile} blocking=${want.blocking}, got ${got}`);
     }
     if (expect.matrixSnapshot) {
       const got = JSON.stringify(out.matrix);
@@ -567,6 +598,8 @@ await profileCase("profile-grok-host-suspect", {
       ],
     },
     observationContains: { "tool-result-redelivery": "ext-apps#750" },
+    // withheld by descriptor for every app, so it says nothing about this one
+    blocking: { "tool-result-redelivery": { profile: "grok", blocking: false } },
   },
 });
 
@@ -605,7 +638,7 @@ await profileCase("profile-popups-broken", {
   },
 });
 
-// --profile all: 10-row × 5-column matrix snapshot + verdict
+// --profile all: 11-row × 5-column matrix snapshot + verdict
 // grok fails check 8 by descriptor (redeliversToolResult:false), so a healthy
 // app under --profile all is APP-OK-HOST-SUSPECT, not APP-OK.
 await profileCase("profile-all-matrix-snapshot", {
@@ -616,6 +649,7 @@ await profileCase("profile-all-matrix-snapshot", {
       checks: [
         "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call",
         "protocol-revision", "tool-result-redelivery", "multi-instance-isolation", "external-navigation",
+        "resource-csp-effective",
       ],
       profiles: ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"],
       cells: [
@@ -629,7 +663,12 @@ await profileCase("profile-all-matrix-snapshot", {
         ["PASS", "PASS", "PASS", "PASS", "FAIL"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["INFO", "INFO", "INFO", "INFO", "INFO"],
+        ["SKIP", "SKIP", "SKIP", "SKIP", "SKIP"],
       ],
+    },
+    // no declaration is not a failure — there is simply nothing to probe
+    observationContains: {
+      "resource-csp-effective": "server declares no _meta.ui.csp; nothing to probe",
     },
   },
 });
@@ -653,6 +692,154 @@ await profileCase("profile-singleton-skip9", {
   },
 });
 
+/* --- check 12: are the origins the server declared reachable from inside the
+   sandbox? Every probe is answered locally, which "0 escaped" asserts. --- */
+
+await profileCase("profile-csp-origins-spec", {
+  scenario: "csp-origins", port: 3430, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: { "resource-csp-effective": { profile: "spec", cell: "PASS" } },
+    observationContains: {
+      "resource-csp-effective":
+        "2/2 reachable inside the sandbox (resource https://cdn.example.com; connect https://api.example.com)",
+    },
+    rawContains: {
+      "resource-csp-effective":
+        "2 probe request(s) attempted, 2 answered locally, 0 stopped by CSP, 0 escaped",
+    },
+  },
+});
+
+// ext-apps#761: claude.ai's sandbox proxy never reads _meta.ui.csp, so the same
+// correct app cannot reach its own CDN there. The verdict absolves the app and
+// the exit code still fails, because the app does not work on that host.
+await profileCase("profile-csp-origins-claude-web", {
+  scenario: "csp-origins", port: 3431, profile: "claude-web",
+  expect: {
+    verdict: "APP-OK-HOST-SUSPECT", exit: 1,
+    cells: {
+      "resource-csp-effective": [
+        { profile: "spec", cell: "PASS" },
+        { profile: "claude-web", cell: "FAIL" },
+      ],
+    },
+    observationContains: {
+      "resource-csp-effective":
+        "0/2 reachable; img-src blocked https://cdn.example.com/__mcp-app-debug-probe, " +
+        "connect-src blocked https://api.example.com/__mcp-app-debug-probe. " +
+        "This host does not apply _meta.ui.csp (ext-apps#761); the app is correct.",
+    },
+    blocking: { "resource-csp-effective": { profile: "claude-web", blocking: true } },
+    // the blocked <img> is reported by Chromium, the blocked fetch() is not;
+    // neither opened a socket, so nothing escaped.
+    rawContains: {
+      "resource-csp-effective":
+        "1 probe request(s) attempted, 0 answered locally, 1 stopped by CSP, 0 escaped",
+    },
+  },
+});
+
+// A wildcard is probed at a synthetic subdomain, a repeat is probed once, and a
+// bare host CSP accepts but nothing can be requested from is reported not probed.
+await profileCase("profile-csp-wildcard", {
+  scenario: "csp-wildcard", port: 3433, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: { "resource-csp-effective": { profile: "spec", cell: "PASS" } },
+    observationContains: {
+      "resource-csp-effective":
+        "2/2 reachable inside the sandbox (resource https://*.example.com; resource https://cdn.example.com); " +
+        "wildcard https://*.example.com probed as https://mcp-app-debug-probe.example.com; " +
+        "1 invalid entry/entries not probed (not a probeable origin): cdn.example.com",
+    },
+    rawContains: { "resource-csp-effective": "0 escaped" },
+  },
+});
+
+// A declared path prefix is probed under itself, because Chromium matches the
+// path too: probing the origin root would report a correct declaration broken.
+// An entry naming one exact file is reported instead, since the only request
+// that could match it is a request for that real file.
+await profileCase("profile-csp-paths", {
+  scenario: "csp-paths", port: 3434, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: { "resource-csp-effective": { profile: "spec", cell: "PASS" } },
+    blocking: { "resource-csp-effective": { profile: "spec", blocking: false } },
+    observationContains: {
+      "resource-csp-effective":
+        "1/1 reachable inside the sandbox (resource https://cdn.example.com/assets/); " +
+        "1 invalid entry/entries not probed (not a probeable origin): " +
+        "https://exact.example.com/logo.png",
+    },
+    rawContains: {
+      "resource-csp-effective":
+        "1 probe request(s) attempted, 1 answered locally, 0 stopped by CSP, 0 escaped",
+    },
+  },
+});
+
+// Check 12 provokes CSP violations on purpose, so it has to be able to tell
+// them from the app's own. Here the app really loads an image from the single
+// origin it declared, served by the fixture itself: allowed under spec, and
+// under claude-web a genuine check-2 failure that the probe must not mask.
+await profileCase("profile-csp-self-asset-spec", {
+  scenario: "csp-self-asset", port: 3435, profile: "spec",
+  expect: {
+    verdict: "APP-OK", exit: 0,
+    cells: {
+      csp: { profile: "spec", cell: "PASS" },
+      "resource-csp-effective": { profile: "spec", cell: "PASS" },
+    },
+  },
+});
+
+await profileCase("profile-csp-self-asset-claude-web", {
+  scenario: "csp-self-asset", port: 3436, profile: "claude-web",
+  expect: {
+    verdict: "APP-OK-HOST-SUSPECT", exit: 1,
+    cells: {
+      csp: [
+        { profile: "spec", cell: "PASS" },
+        { profile: "claude-web", cell: "FAIL" },
+      ],
+      "resource-csp-effective": [
+        { profile: "spec", cell: "PASS" },
+        { profile: "claude-web", cell: "FAIL" },
+      ],
+    },
+    observationContains: {
+      // the app's own blocked asset, not the probe's
+      csp: "img-src blocked http://localhost:3436/asset.png",
+      "resource-csp-effective": "img-src blocked http://localhost:3436/__mcp-app-debug-probe",
+    },
+  },
+});
+
+// The other half of check 12: a declaration a host DOES apply and the browser
+// still refuses. Userinfo in a source expression parses but matches nothing, so
+// this fails under spec, where there is no host knob to blame, and the detail
+// line says the app is at fault rather than the host.
+await profileCase("profile-csp-unmatchable-spec", {
+  scenario: "csp-unmatchable", port: 3437, profile: "spec",
+  expect: {
+    verdict: "APP-FAULT", exit: 1,
+    cells: { "resource-csp-effective": { profile: "spec", cell: "FAIL" } },
+    blocking: { "resource-csp-effective": { profile: "spec", blocking: true } },
+    observationContains: {
+      "resource-csp-effective":
+        "0/1 reachable; img-src blocked https://cdn.example.com/__mcp-app-debug-probe. " +
+        "This profile does apply _meta.ui.csp, so the block is not the host knob. " +
+        "The declared entry does not cover the request that was made.",
+    },
+    rawContains: {
+      "resource-csp-effective":
+        "1 probe request(s) attempted, 0 answered locally, 1 stopped by CSP, 0 escaped",
+    },
+  },
+});
+
 // Profile mode over stdio (the transport has no HTTP endpoint to hash, and
 // checks 8-10 must still resolve).
 {
@@ -669,18 +856,18 @@ await profileCase("profile-singleton-skip9", {
   }
   if (out) {
     if (out.verdict !== "APP-OK") problems.push(`expected APP-OK, got ${out.verdict}`);
-    if (out.matrix.checks.length !== 10) problems.push(`expected 10 rows, got ${out.matrix.checks.length}`);
+    if (out.matrix.checks.length !== 11) problems.push(`expected 11 rows, got ${out.matrix.checks.length}`);
     const row = out.matrix.checks.indexOf("tool-result-redelivery");
     if (out.matrix.cells[row][0] !== "PASS") problems.push(`expected check 8 PASS over stdio, got ${out.matrix.cells[row][0]}`);
   }
   if (code !== 0) problems.push(`expected exit 0, got ${code}`);
-  problems.length ? fail("profile-stdio", problems) : console.log("ok   profile-stdio (APP-OK, 10 rows)");
+  problems.length ? fail("profile-stdio", problems) : console.log("ok   profile-stdio (APP-OK, 11 rows)");
 }
 
 // --profile with artifacts: one file per profile, suffixed with its name.
 {
   const dir = await mkdtemp(path.join(tmpdir(), "mcp-app-debug-artifacts-"));
-  const server = spawn(process.execPath, ["test/profile-server.mjs", "weather", "3420"], { stdio: "ignore" });
+  const server = spawnFixture(["test/profile-server.mjs", "weather", "3420"]);
   try {
     await waitForServer("http://localhost:3420/mcp");
     const { code } = await runCli([
@@ -719,7 +906,7 @@ const aggregatorCase = (name, { scenario, port, args, expect }) =>
     ...expect,
     spawnServer: () => ({
       port,
-      proc: spawn(process.execPath, ["test/profile-server.mjs", scenario, String(port)], { stdio: "ignore" }),
+      proc: spawnFixture(["test/profile-server.mjs", scenario, String(port)]),
     }),
   });
 
@@ -822,7 +1009,7 @@ await profileCase("profile-aggregator-descriptor", {
   },
 });
 
-// --profile all --aggregator: eleven rows, and row 11 in matrix.checks.
+// --profile all --aggregator: twelve rows, and row 11 in matrix.checks.
 await profileCase("profile-all-aggregator-matrix", {
   scenario: "resolved-names", port: 3428, profile: "all", extraArgs: ["--aggregator"],
   expect: {
@@ -831,7 +1018,7 @@ await profileCase("profile-all-aggregator-matrix", {
       checks: [
         "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call",
         "protocol-revision", "tool-result-redelivery", "multi-instance-isolation",
-        "external-navigation", "aggregator-safe-tool-names",
+        "external-navigation", "aggregator-safe-tool-names", "resource-csp-effective",
       ],
       profiles: ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"],
       cells: [
@@ -846,6 +1033,7 @@ await profileCase("profile-all-aggregator-matrix", {
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["INFO", "INFO", "INFO", "INFO", "INFO"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
+        ["SKIP", "SKIP", "SKIP", "SKIP", "SKIP"],
       ],
     },
   },

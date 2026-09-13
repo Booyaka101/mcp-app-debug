@@ -12,8 +12,21 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { chromium, type Browser, type Frame, type Page } from "playwright";
-import { buildReport, evaluateAggregatorCheck, evaluateChecks, evaluateProfileChecks } from "./checks.js";
-import { buildCspHeader, scanMetaCspForFrameAncestors, type ResourceCsp } from "./csp.js";
+import {
+  buildReport,
+  evaluateAggregatorCheck,
+  evaluateChecks,
+  evaluateCspProbeCheck,
+  evaluateProfileChecks,
+} from "./checks.js";
+import {
+  buildCspHeader,
+  isCspProbeUrl,
+  planCspProbes,
+  scanMetaCspForFrameAncestors,
+  type CspProbeTarget,
+  type ResourceCsp,
+} from "./csp.js";
 import { isUnknownNamespaceError, UNKNOWN_NAMESPACE_CODE } from "./mcp/aggregator.js";
 import { callToolWithId } from "./mcp/connect.js";
 import type { ProfileDescriptor } from "./profiles/index.js";
@@ -265,7 +278,12 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
   // which is only known after the host server starts — hence the closure.
   let hostOriginForCsp: string | undefined;
   const cspHeader = () =>
-    buildCspHeader(resourceCsp, opts.profile?.csp, hostOriginForCsp);
+    buildCspHeader(
+      resourceCsp,
+      opts.profile?.csp,
+      hostOriginForCsp,
+      opts.profile?.appliesResourceCsp ?? true,
+    );
   const sandbox = await serveOnLocalhost((req, res) => {
     if (req.url?.startsWith("/sandbox.html") || req.url === "/") {
       res.writeHead(200, {
@@ -284,6 +302,7 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
 
   // Profile mode: pre-compute what the page needs for checks 8 and 9.
   let profileConfig: HarnessConfig["profile"];
+  let cspProbeTargets: CspProbeTarget[] = [];
   if (opts.profile) {
     const p = opts.profile;
     const varied = deriveSecondArgs(tool, toolArgs);
@@ -294,6 +313,19 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     if (p.maxConcurrentInstances < 2) {
       state.instance2.skipped = `profile ${p.name} mounts at most 1 concurrent instance`;
     }
+    const plan = planCspProbes(resourceCsp);
+    state.cspProbe = {
+      pending: plan.targets.length > 0,
+      appliesResourceCsp: p.appliesResourceCsp,
+      results: [],
+      invalid: plan.invalid,
+      capped: plan.capped,
+      requestsSeen: 0,
+      requestsFulfilled: 0,
+      requestsBlocked: 0,
+      ...(plan.nothing ? { skipped: plan.nothing } : {}),
+    };
+    cspProbeTargets = plan.targets;
     profileConfig = {
       name: p.name,
       sandbox: p.sandboxTokens.join(" "),
@@ -378,6 +410,51 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
   let pageClosed = false;
   page.on("close", () => { pageClosed = true; });
 
+  // Check 12's probes are answered here and never leave the machine: the check
+  // asks whether the sandbox POLICY let the request out, not whether the origin
+  // exists.
+  const probeAnswered = new Set<string>();
+  if (state.cspProbe) {
+    const probe = state.cspProbe;
+    page.on("request", (req) => {
+      if (isCspProbeUrl(req.url())) probe.requestsSeen++;
+    });
+    // Chromium reports a CSP-blocked image as request + requestfailed("csp"):
+    // the event fires but no socket is opened, so it is not an escape. A
+    // blocked fetch() is not reported at this layer at all.
+    page.on("requestfailed", (req) => {
+      const why = req.failure()?.errorText ?? "";
+      if (isCspProbeUrl(req.url()) && /csp|blocked/i.test(why)) probe.requestsBlocked++;
+    });
+    await page.route(
+      (url) => isCspProbeUrl(url),
+      async (route) => {
+        const req = route.request();
+        probe.requestsFulfilled++;
+        probeAnswered.add(
+          probeKey(req.resourceType() === "image" ? "resource" : "connect", req.url()),
+        );
+        // A bare 204 would still fail the fetch() half on CORS, which reads in
+        // the log like a block; allowing the origin keeps the two halves alike.
+        await route.fulfill({
+          status: 204,
+          headers: { "access-control-allow-origin": "*" },
+        });
+      },
+    );
+  }
+  // Check 12 provokes its own violations, and they are its evidence, not the
+  // app's. Classified here so the log entry carries the answer and check 2's
+  // verdict and evidence can never disagree about the same violation.
+  const isProbeViolation = (v: Record<string, unknown>): boolean => {
+    const uri = String(v.blockedURI ?? "");
+    if (isCspProbeUrl(uri)) return true;
+    // CSP permits a cross-origin report truncated to the origin. Only while the
+    // probe is in flight: matching the origin alone would swallow a real block
+    // on a declared origin and leave check 2 silent about it.
+    return state.cspProbe?.pending === true && cspProbeTargets.some((t) => uri === t.origin);
+  };
+
   const pushToPanel = (entry: LogEntry) => {
     if (pageClosed) return;
     page
@@ -425,6 +502,10 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     if (aggregatorCheck && (done || (state.aggregator?.appCalls.length ?? 0) > 0)) {
       checks = [...checks, aggregatorCheck];
     }
+    const cspProbeCheck = evaluateCspProbeCheck(state);
+    if (cspProbeCheck && (done || !state.cspProbe?.pending)) {
+      checks = [...checks, cspProbeCheck];
+    }
     page
       .evaluate(
         (arg: { cs: CheckResult[]; d: boolean }) =>
@@ -456,6 +537,23 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
       .finally(() => pushChecks(false));
   };
 
+  let cspProbeStarted = false;
+  const maybeCspProbe = () => {
+    const probe = state.cspProbe;
+    if (cspProbeStarted || !probe || !probe.pending) return;
+    cspProbeStarted = true;
+    // Fire and forget: checks 1-11 are evaluated continuously and never wait
+    // on this. Only the end of the observation window does (profileResolved).
+    runCspProbe(page, sandbox.origin, cspProbeTargets, probeAnswered, probe, note)
+      .catch((e) => {
+        probe.skipped = `CSP origin probe failed: ${e instanceof Error ? e.message : e}`;
+      })
+      .finally(() => {
+        probe.pending = false;
+        pushChecks(false);
+      });
+  };
+
   let interactStarted = false;
   const maybeInteract = () => {
     if (interactStarted) return;
@@ -473,6 +571,9 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
   // page -> node: protocol log entries (also markers for checks)
   await page.exposeBinding("__mcpLog", (source, entry: LogEntry) => {
     if (source.frame !== page.mainFrame()) return;
+    if (entry.marker === "csp-violation" && entry.data && isProbeViolation(entry.data)) {
+      entry.probe = true;
+    }
     emit(entry);
     if (entry.dir === "app→host" && entry.kind === "request" && entry.method === "tools/call") {
       state.appToolCallAttempts++;
@@ -505,14 +606,16 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
           if (state.instance2) state.instance2.readyAt = entry.ts;
         } else {
           state.uiReadyAt = entry.ts;
+          maybeCspProbe();
           maybeInteract();
         }
         break;
       case "csp-violation":
         // The sandbox proxy's own bundle evals (zod JIT) and trips the strict
-        // profile CSP — that is harness infrastructure, not the app under test.
+        // profile CSP — harness infrastructure, not the app under test.
         if (
           entry.data &&
+          !entry.probe &&
           !(String(entry.data.sourceFile ?? "").endsWith("/sandbox.js") &&
             entry.data.blockedURI === "eval")
         ) {
@@ -715,7 +818,7 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     );
     const i2 = state.instance2;
     const i2Done = !!i2 && (i2.skipped !== undefined || i2.uiInitializeRespondedAt !== undefined);
-    return scDone && i2Done && state.navProbe !== undefined;
+    return scDone && i2Done && state.navProbe !== undefined && state.cspProbe?.pending !== true;
   };
   await new Promise<void>((resolve) => {
     let allPassSince: number | undefined;
@@ -725,6 +828,7 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
       if (
         evaluateChecks(state, opts.profile).every((c) => c.pass) &&
         (evaluateAggregatorCheck(state)?.pass ?? true) &&
+        (evaluateCspProbeCheck(state)?.pass ?? true) &&
         profileResolved()
       ) {
         allPassSince ??= Date.now();
@@ -841,6 +945,107 @@ export function deriveSecondArgs(
   return null;
 }
 
+/** The app lives in the inner iframe of the sandbox frame, which the outer
+ * proxy document.writes so it inherits the sandbox origin and header CSP. */
+function appFrameOf(page: Page, sandboxOrigin: string): Frame | undefined {
+  const sandboxFrame = page.frames().find((f) => f.url().startsWith(sandboxOrigin));
+  return sandboxFrame?.childFrames()[0];
+}
+
+/** The same URL can appear in both declared lists, so the route's hit set is
+ * keyed by which half of the probe made the request. */
+function probeKey(kind: CspProbeTarget["kind"], url: string): string {
+  return `${kind} ${url}`;
+}
+
+const PROBE_TIMEOUT_MS = 2000;
+
+/**
+ * Check 12: ask the sandbox itself whether the origins the server declared in
+ * `_meta.ui.csp` are actually reachable from inside it — an <img> per
+ * resourceDomains entry, a fetch() per connectDomains entry. A request the
+ * route handler answers got past the policy; a securitypolicyviolation naming
+ * the origin means the policy stopped it before any request was made.
+ */
+async function runCspProbe(
+  page: Page,
+  sandboxOrigin: string,
+  targets: CspProbeTarget[],
+  answered: Set<string>,
+  probe: NonNullable<HarnessState["cspProbe"]>,
+  note: (method: string, payload?: string, dir?: LogEntry["dir"]) => void,
+): Promise<void> {
+  const appFrame = appFrameOf(page, sandboxOrigin);
+  if (!appFrame) {
+    probe.skipped = "CSP origin probe skipped: app frame not found";
+    note("resource-csp probe", probe.skipped);
+    return;
+  }
+  const violations = await appFrame.evaluate(
+    async (arg: { targets: CspProbeTarget[]; timeoutMs: number }) => {
+      const seen: Array<{ directive: string; blockedURI: string }> = [];
+      const onViolation = (e: SecurityPolicyViolationEvent) => {
+        seen.push({
+          directive: e.effectiveDirective || e.violatedDirective,
+          blockedURI: e.blockedURI,
+        });
+      };
+      document.addEventListener("securitypolicyviolation", onViolation);
+      const settle = (run: () => Promise<unknown>) =>
+        Promise.race([
+          run().then(
+            () => undefined,
+            () => undefined,
+          ),
+          new Promise<void>((r) => setTimeout(r, arg.timeoutMs)),
+        ]);
+      await Promise.all(
+        arg.targets.map((t) =>
+          settle(() =>
+            t.kind === "connect"
+              ? fetch(t.url, { mode: "cors" })
+              : new Promise((resolve, reject) => {
+                  const img = new Image();
+                  img.onload = resolve;
+                  img.onerror = reject;
+                  img.src = t.url;
+                }),
+          ),
+        ),
+      );
+      // The violation event can land a tick after the load error it caused.
+      await new Promise((r) => setTimeout(r, 100));
+      document.removeEventListener("securitypolicyviolation", onViolation);
+      return seen;
+    },
+    { targets, timeoutMs: PROBE_TIMEOUT_MS },
+  );
+
+  probe.results = targets.map((t) => {
+    // Chromium reports the full probe URL; CSP permits a report truncated to
+    // the origin, and two entries can share an origin under different paths.
+    const hits = violations.filter((v) => v.blockedURI === t.url || v.blockedURI === t.origin);
+    const wanted = t.kind === "resource" ? "img-src" : "connect-src";
+    const violation = hits.find((v) => v.directive === wanted) ?? hits[0];
+    const outcome = answered.has(probeKey(t.kind, t.url))
+      ? ("allowed" as const)
+      : violation
+        ? ("blocked" as const)
+        : ("unknown" as const);
+    return { ...t, outcome, ...(violation ? { directive: violation.directive } : {}) };
+  });
+
+  const allowed = probe.results.filter((r) => r.outcome === "allowed").length;
+  const escaped = probe.requestsSeen - probe.requestsFulfilled - probe.requestsBlocked;
+  note(
+    "resource-csp probe",
+    `${allowed}/${probe.results.length} reachable; ` +
+      `${probe.requestsSeen} probe request(s) attempted, ` +
+      `${probe.requestsFulfilled} answered locally, ` +
+      `${probe.requestsBlocked} stopped by CSP, ${escaped} escaped`,
+  );
+}
+
 /**
  * Check 10: attempt window.open and a target=_blank click from inside the
  * app frame, and record who blocked it. Playwright emits a context "page"
@@ -854,8 +1059,7 @@ async function runNavProbe(
   note: (method: string, payload?: string, dir?: LogEntry["dir"]) => void,
   popupsAllowed: boolean,
 ): Promise<void> {
-  const sandboxFrame = page.frames().find((f) => f.url().startsWith(sandboxOrigin));
-  const appFrame: Frame | undefined = sandboxFrame?.childFrames()[0];
+  const appFrame = appFrameOf(page, sandboxOrigin);
   if (!appFrame) {
     state.navProbe = { popupsAllowed, error: "navigation probe skipped: app frame not found" };
     note("external-navigation probe", state.navProbe.error);
@@ -945,8 +1149,7 @@ async function autoInteract(
   state: HarnessState,
   note: (method: string, payload?: string, dir?: LogEntry["dir"]) => void,
 ): Promise<void> {
-  const sandboxFrame = page.frames().find((f) => f.url().startsWith(sandboxOrigin));
-  const appFrame: Frame | undefined = sandboxFrame?.childFrames()[0];
+  const appFrame = appFrameOf(page, sandboxOrigin);
   if (!appFrame) {
     state.interactNote = "auto-interact: app frame not found";
     note("auto-interact", state.interactNote);

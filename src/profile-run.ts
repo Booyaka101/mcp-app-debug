@@ -13,7 +13,7 @@ import {
   PROFILE_NAMES,
   type ProfileDescriptor,
 } from "./profiles/index.js";
-import type { CheckReport, CheckResult, LogEntry } from "./types.js";
+import { CHECK_NUMBERS, type CheckReport, type CheckResult, type LogEntry } from "./types.js";
 
 export type Verdict = "APP-FAULT" | "APP-OK-HOST-SUSPECT" | "APP-OK";
 
@@ -62,15 +62,15 @@ function printProfileReport(result: ProfileRunResult): void {
   process.stdout.write(
     `\nProfile ${result.name} — server ${r.server}, tool ${r.tool}, mode ${r.mode}\n`,
   );
-  r.checks.forEach((c, i) => {
+  for (const c of r.checks) {
     process.stdout.write(
-      `  ${mark(cellOf(c))}  ${String(i + 1).padStart(2)} ${c.title.padEnd(28)} ${c.detail}\n`,
+      `  ${mark(cellOf(c))}  ${String(CHECK_NUMBERS[c.id]).padStart(2)} ${c.title.padEnd(28)} ${c.detail}\n`,
     );
-  });
+  }
 }
 
 interface MatrixJson {
-  checks: string[];
+  checks: CheckResult["id"][];
   profiles: string[];
   /** cells[row][col] — rows follow `checks`, columns follow `profiles` */
   cells: string[][];
@@ -80,7 +80,7 @@ interface MatrixJson {
  * descriptor can carry `toolNameRewrite` while the spec baseline does not, so
  * the columns need not agree on the row list. */
 function buildMatrix(results: ProfileRunResult[]): MatrixJson {
-  const checks: string[] = [];
+  const checks: CheckResult["id"][] = [];
   for (const r of results) {
     for (const c of r.report.checks) if (!checks.includes(c.id)) checks.push(c.id);
   }
@@ -99,7 +99,7 @@ function buildMatrix(results: ProfileRunResult[]): MatrixJson {
 function printMatrix(results: ProfileRunResult[], matrix: MatrixJson): void {
   const titles = new Map<string, string>();
   for (const r of results) for (const c of r.report.checks) titles.set(c.id, c.title);
-  const labels = matrix.checks.map((id, i) => `${i + 1} ${titles.get(id) ?? id}`);
+  const labels = matrix.checks.map((id) => `${CHECK_NUMBERS[id]} ${titles.get(id) ?? id}`);
   const labelWidth = Math.max(...labels.map((l) => l.length)) + 2;
   const colWidth = Math.max(...matrix.profiles.map((p) => p.length), 4) + 2;
   process.stdout.write("\n" + " ".repeat(labelWidth));
@@ -170,7 +170,7 @@ function buildEvidence(results: ProfileRunResult[]): Array<{
 }> {
   const FILTERS: Record<string, (e: LogEntry) => boolean> = {
     "resource-uri": (e) => e.method === "resources/read" || e.method === "tool-selected",
-    csp: (e) => e.marker === "csp-violation",
+    csp: (e) => e.marker === "csp-violation" && !e.probe,
     "ui-domain": (e) => e.method === "resources/read",
     "ui-initialize": (e) => e.marker === "ui-initialize" || e.marker === "ui-initialize-response",
     "ui-ready": (e) => e.marker === "ui-ready",
@@ -190,12 +190,14 @@ function buildEvidence(results: ProfileRunResult[]): Array<{
       e.method?.startsWith("tools/call") === true ||
       e.method?.startsWith("tools/list") === true ||
       e.method?.startsWith("aggregator refused") === true,
+    "resource-csp-effective": (e) =>
+      e.method === "resource-csp probe" || (e.marker === "csp-violation" && e.probe === true),
   };
   const evidence: ReturnType<typeof buildEvidence> = [];
   for (const r of results) {
-    r.report.checks.forEach((c, i) => {
+    for (const c of r.report.checks) {
       const status = statusOf(c);
-      if (status === "pass" && i < 7) return; // 1-7 only when notable; 8-10 always
+      if (status === "pass" && CHECK_NUMBERS[c.id] <= 7) continue; // 1-7 only when notable
       const filter = FILTERS[c.id];
       const raw = filter
         ? r.entries
@@ -209,8 +211,10 @@ function buildEvidence(results: ProfileRunResult[]): Array<{
         observation: `${status.toUpperCase()}: ${c.detail}`,
         timestampMs: c.ms ?? null,
         rawMessages: raw,
+        // why the exit code can be 1 on a verdict that absolves the app
+        ...(c.blocking && status === "fail" ? { blocking: true } : {}),
       });
-    });
+    }
   }
   return evidence;
 }
@@ -254,5 +258,10 @@ export async function runProfiled(base: HostOptions, profileArg: string): Promis
     if (results.length > 1) printMatrix(results, matrix);
     process.stdout.write(`\n${line}\n`);
   }
-  return verdict === "APP-FAULT" ? 1 : 0;
+  // A blocking check is one where the app is correct and still does not work on
+  // this host (check 12 under a profile that drops _meta.ui.csp).
+  const blocked = results.some((r) =>
+    r.report.checks.some((c) => c.blocking && statusOf(c) === "fail"),
+  );
+  return verdict === "APP-FAULT" || blocked ? 1 : 0;
 }

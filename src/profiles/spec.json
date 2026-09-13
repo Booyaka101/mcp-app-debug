@@ -12,6 +12,7 @@
   "redeliversToolResult": true,
   "maxConcurrentInstances": 2,
   "honoursUiDomain": true,
+  "appliesResourceCsp": true,
   "sources": [
     "https://modelcontextprotocol.io/specification/2026-07-28/basic/index",
     "https://github.com/modelcontextprotocol/ext-apps/releases/tag/v1.7.0",
