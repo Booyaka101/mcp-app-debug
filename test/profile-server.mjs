@@ -28,6 +28,21 @@
  *                                                       → check 11 PASSes
  *   namespaced  the tool is already called "alpha__forecast" upstream, so an
  *               aggregator must not prefix it twice     → check 11 PASSes
+ *   csp-origins the resource declares _meta.ui.csp with one resourceDomains and
+ *               one connectDomains origin, so check 12 has something to probe:
+ *               PASS under spec, FAIL under claude-web (ext-apps#761)
+ *   csp-wildcard  resourceDomains carries a wildcard, a duplicate and a bare
+ *               host with no scheme — check 12 probes a synthetic subdomain,
+ *               dedupes, and reports the schemeless entry as unprobeable
+ *   csp-paths   one entry is a path prefix and one names an exact file — the
+ *               prefix is probed under itself, the file is not probeable
+ *   csp-self-asset  the app really loads an image from the one origin it
+ *               declared, served by this fixture so nothing leaves the machine:
+ *               allowed under spec, a genuine check-2 violation under
+ *               claude-web, which check 12's own violations must not mask
+ *   csp-unmatchable  the declared entry carries userinfo, so Chromium matches
+ *               it against nothing — check 12 FAILs even under spec, where the
+ *               host does apply the declaration, and blames the app
  *
  * Add --stdio to serve over stdio instead of HTTP (port ignored).
  */
@@ -44,7 +59,8 @@ import {
 
 const SCENARIOS = [
   "weather", "first-only", "leak", "popup", "noargs", "singleton",
-  "bare-names", "resolved-names", "listed-names", "namespaced",
+  "bare-names", "resolved-names", "listed-names", "namespaced", "csp-origins",
+  "csp-wildcard", "csp-paths", "csp-self-asset", "csp-unmatchable",
 ];
 const stdioMode = process.argv.includes("--stdio");
 const argv = process.argv.slice(2).filter((a) => a !== "--stdio");
@@ -58,14 +74,49 @@ const port = Number(argv[1] ?? 3009);
 // namespaced: the upstream name already carries the separator.
 const TOOL_NAME = scenario === "namespaced" ? "alpha__forecast" : "forecast";
 
+// The declaration each csp-* scenario ships. The origins are never contacted —
+// the harness answers /__mcp-app-debug-probe itself — so example.com is safe.
+const DECLARED_CSP = {
+  "csp-self-asset": { resourceDomains: [`http://localhost:${port}`], connectDomains: [] },
+  // a source expression's path is part of the match: the first is a prefix the
+  // probe can go under, the second matches only that one file
+  "csp-paths": {
+    resourceDomains: ["https://cdn.example.com/assets/", "https://exact.example.com/logo.png"],
+    connectDomains: [],
+  },
+  // a wildcard, the same origin twice, and a bare host CSP accepts but that is
+  // not an origin anything can be requested from
+  "csp-wildcard": {
+    resourceDomains: [
+      "https://*.example.com",
+      "https://cdn.example.com",
+      "https://cdn.example.com",
+      "cdn.example.com",
+    ],
+    connectDomains: [],
+  },
+  // userinfo makes a source expression unmatchable: Chromium parses it, then it
+  // matches nothing, not even its own origin. The sanitizer keeps it and the
+  // planner can derive a URL from it, so only a real request finds the mistake.
+  "csp-unmatchable": {
+    resourceDomains: ["https://user@cdn.example.com"],
+    connectDomains: [],
+  },
+  "csp-origins": {
+    resourceDomains: ["https://cdn.example.com"],
+    connectDomains: ["https://api.example.com"],
+  },
+}[scenario];
+
 let calls = 0;
 let resourceReads = 0;
 const SEEDED_CITIES = new Set(["Tokyo", "Kyoto", "Osaka"]);
 
-function appHtml({ leak = false, popup = false, resolve = false, list = false } = {}) {
+function appHtml({ leak = false, popup = false, resolve = false, list = false, asset = false } = {}) {
   return `<!doctype html>
 <html><head><meta charset="utf-8"></head>
 <body><h3 style="font-family:sans-serif">profile-server app (${scenario})</h3>
+${asset ? `<img src="http://localhost:${port}/asset.png" width="8" height="8" alt="">` : ""}
 <div id="out"></div>
 <script>
   const post = (m) => window.parent.postMessage(m, "*");
@@ -165,6 +216,7 @@ function buildServer() {
     popup: scenario === "popup",
     resolve: scenario === "resolved-names",
     list: scenario === "listed-names",
+    asset: scenario === "csp-self-asset",
   });
   registerAppResource(server, uri, uri, { mimeType: RESOURCE_MIME_TYPE }, async () => {
     resourceReads++;
@@ -173,7 +225,16 @@ function buildServer() {
     if (scenario === "singleton" && resourceReads > 1) {
       throw new Error("this ui:// resource is a singleton and has already been read");
     }
-    return { contents: [{ uri, mimeType: RESOURCE_MIME_TYPE, text: html }] };
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: RESOURCE_MIME_TYPE,
+          text: html,
+          ...(scenario.startsWith("csp-") ? { _meta: { ui: { csp: DECLARED_CSP } } } : {}),
+        },
+      ],
+    };
   });
   return server;
 }
@@ -187,9 +248,20 @@ if (stdioMode) {
   startHttp();
 }
 
+const PNG_1x1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
 function startHttp() {
 http
   .createServer(async (req, res) => {
+    // the one real asset the csp-self-asset app loads; local, so the suite
+    // still sends nothing to the network
+    if (req.url === "/asset.png") {
+      res.writeHead(200, { "content-type": "image/png" }).end(PNG_1x1);
+      return;
+    }
     if (!req.url?.startsWith("/mcp")) {
       res.writeHead(404).end();
       return;

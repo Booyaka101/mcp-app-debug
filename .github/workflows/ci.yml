@@ -25,7 +25,8 @@ jobs:
     # scan twice (spec baseline + named profile) and --profile all runs it five
     # times, so it needs more headroom than the 7-check era. The ceiling is set
     # by Windows, where `npm ci` and each `npx ./pkg.tgz` cost ~6 minutes apiece
-    # on top of an 11-minute suite. 0.7.0 hit the old 40 exactly.
+    # on top of the suite. 0.7.0 hit the old 40 exactly on an 11-minute suite;
+    # 0.8.0 adds seven check-12 profile cases on top of that.
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
@@ -56,9 +57,11 @@ jobs:
           node -e "
             const r = JSON.parse(require('fs').readFileSync('profiles.json', 'utf8').replace(/^﻿/, ''));
             const row = r.matrix.checks.indexOf('tool-result-redelivery');
-            if (r.matrix.checks.length !== 10) throw new Error('expected 10 rows, got ' + r.matrix.checks.length);
+            const csp = r.matrix.checks.indexOf('resource-csp-effective');
+            if (r.matrix.checks.length !== 11) throw new Error('expected 11 rows, got ' + r.matrix.checks.length);
             if (r.verdict !== 'APP-OK-HOST-SUSPECT') throw new Error('expected APP-OK-HOST-SUSPECT, got ' + r.verdict);
             if (r.matrix.cells[row].join() !== 'PASS,FAIL') throw new Error('expected check 8 PASS,FAIL got ' + r.matrix.cells[row].join());
+            if (r.matrix.cells[csp].join() !== 'SKIP,SKIP') throw new Error('expected check 12 SKIP,SKIP got ' + r.matrix.cells[csp].join());
             console.log('tarball profile smoke test OK:', r.verdict);
           "
       - name: Smoke-test aggregator mode from the packed tarball

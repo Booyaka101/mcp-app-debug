@@ -8,7 +8,7 @@ error, no log, the iframe just never appears
 the **same App Bridge + double-iframe sandbox path** as spec-conformant
 clients, shows **every postMessage exchange live in a side panel**, and gives
 you **7 automated PASS/FAIL diagnostics** that tell you exactly where the flow
-broke. When it renders on one host but not another, `--profile` adds three
+broke. When it renders on one host but not another, `--profile` adds four
 cross-host checks and tells you **whether the fault is yours or the host's** —
 see [Host profiles](#host-profiles-and-the-fault-verdict---profile), and
 [`--aggregator`](#behind-a-gateway---aggregator) puts a namespacing gateway in
@@ -161,7 +161,9 @@ baseline first, so the verdict is always computable.
 > it runs only where you say a rewrite is in play (`--aggregator`, or a
 > descriptor with `toolNameRewrite`) and never on a bare `spec` run.
 
-### Checks 8-10 (profile mode only)
+### Checks 8-10 and 12 (profile mode only)
+
+(11 is aggregator-only and lives [below](#check-11-aggregator-mode-only).)
 
 8. **tool-result redelivery** — a second `tools/call` with *different*
    arguments goes through the same connection to the already-mounted app.
@@ -178,14 +180,99 @@ baseline first, so the verdict is always computable.
     so blocking is correct and worth *recording*, not failing). It only FAILs
     when the active profile grants popups and navigation is blocked anyway,
     and it distinguishes a sandbox-level block from a browser-level one.
+12. **declared CSP origins reachable** — check 2 reads the policy, this one
+    tries it. After `ui/ready` the harness injects a probe
+    into the sandbox: an `<img>` per `_meta.ui.csp.resourceDomains` origin and
+    a `fetch()` per `connectDomains` origin, each to
+    `<origin>/__mcp-app-debug-probe`. A Playwright route answers every one of
+    those with `204` locally, so nothing leaves your machine and the check is
+    about the *policy*, not about whether the origin is up. A request that
+    reaches the route is reachable; a `securitypolicyviolation` naming the
+    origin means the sandbox stopped it before any request was made. `SKIP`s
+    when the server declares no `_meta.ui.csp`. Wildcards are probed at a
+    synthetic subdomain (`https://*.example.com` →
+    `https://mcp-app-debug-probe.example.com`) and the check says so; entries
+    CSP accepts but nothing can be requested from (`cdn.example.com`, `*`,
+    `https:`) are reported as unprobeable rather than counted as blocked. A
+    source expression's path counts too, so an entry ending in `/` is probed
+    under its own prefix (`https://cdn.example.com/assets/` →
+    `https://cdn.example.com/assets/__mcp-app-debug-probe`), and one naming an
+    exact file is reported as unprobeable, because the only request that could
+    match it is a real request for that real file. If a probe simply never
+    comes back inside its 2 s window the check reports `INFO`, not a failure:
+    a loaded machine is not evidence about the declaration.
+
+Check 12 is where
+[ext-apps #761](https://github.com/modelcontextprotocol/ext-apps/issues/761)
+shows up. claude.ai's sandbox proxy destructures only `{html, permissions}`
+from the resource and never reads `csp`, so the `resourceDomains` you declared
+never reach the policy the sandbox is served with, and your app's images and
+API calls are blocked on a host where you did nothing wrong. That is modelled
+by the `appliesResourceCsp` knob, `false` only on `claude-web`. Rows 2 and 12 of
+eleven, against the `csp-origins` fixture, long lines wrapped:
+
+```
+$ npx mcp-app-debug http://localhost:3001/mcp --profile claude-web
+
+  PASS   2 CSP permits embedding & assets no violations; _meta.ui.csp honored:
+                                          {"resourceDomains":["https://cdn.example.com"],
+                                           "connectDomains":["https://api.example.com"]}
+  FAIL  12 declared CSP origins reachable 0/2 reachable; img-src blocked
+                                          https://cdn.example.com/__mcp-app-debug-probe, connect-src blocked
+                                          https://api.example.com/__mcp-app-debug-probe. This host does not apply
+                                          _meta.ui.csp (ext-apps#761); the app is correct.
+
+VERDICT: APP-OK-HOST-SUSPECT — every check passes under spec, but claude-web: declared CSP origins reachable fail(s) under
+a community-observed profile; the divergence is on the host side
+```
+
+![the same app under claude-web: the CSP chip green, the CSP origins chip red](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/csp-761.png)
+
+Check 2 stays exactly as it was: it reports violations your app caused, and the
+probe's deliberate ones are filtered out of it. That is the pair of chips in the
+shot above, green next to red, on a run where the app did nothing wrong. Reading one against the other
+is the point. Check 2 green and check 12 red means the declaration is right
+and the host ignored it.
+
+### The knobs a descriptor sets
+
+| Knob | What it models | Check it drives |
+| --- | --- | --- |
+| `sandboxTokens` | the `sandbox` attribute the host puts on the iframe | 10 |
+| `csp` | `frame-ancestors`, `script-src`, `default-src`, `object-src` of the served policy | 2, 12 |
+| `popupsAllowed` | whether the host intends external navigation to work | 10 |
+| `redeliversToolResult` | whether a later `tools/call` result reaches a mounted app | 8 |
+| `maxConcurrentInstances` | how many copies of one view mount at once | 9 |
+| `honoursUiDomain` | whether `_meta.ui.domain` is enforced or ignored | 3 |
+| `appliesResourceCsp` | whether the sandbox proxy folds your `_meta.ui.csp` `resourceDomains`/`connectDomains` into the policy it serves (ext-apps#761) | 12 |
+| `toolNameRewrite` | a namespacing gateway in front of the server | 11 |
+| `sources` | the public evidence for every knob above; an empty list is refused at load | — |
+
+`appliesResourceCsp` and `toolNameRewrite` both default to `true`/absent, so a
+descriptor written before 0.8.0 still loads unchanged.
 
 The verdict then attributes fault:
 
 | Verdict | Meaning | Exit |
 | --- | --- | --- |
 | `APP-FAULT` | a check fails under **spec** — fix your app before blaming a host | 1 |
-| `APP-OK-HOST-SUSPECT` | passes under spec, fails under a named profile — the divergence is host-side | 0 |
+| `APP-OK-HOST-SUSPECT` | passes under spec, fails under a named profile — the divergence is host-side | 0, or 1 if the failing check is blocking |
 | `APP-OK` | everything passes everywhere it ran | 0 |
+
+**Reading `APP-OK-HOST-SUSPECT`.** It means your app is correct and something
+about the host is not. Whether that is *actionable* depends on which check
+failed, which is why the exit code splits:
+
+- Check 8 under `grok` is withheld by the descriptor for **every** app, so it
+  says nothing about yours. Exit `0`, the run is informational.
+- Check 12 is contingent on what **your** server declared: your app asked for
+  origins this host will not grant it, so on that host it does not work. Exit
+  `1`, so CI does not go green on "it renders but loads nothing". The verdict
+  line still reads `APP-OK-HOST-SUSPECT`, because the fix is an issue on the
+  host, not a change to your app.
+
+Checks that fail this way carry `"blocking": true` on their `evidence` entry
+in the JSON report, so CI can say which check took the exit code to `1`.
 
 ### Real run against a third-party server
 
@@ -195,19 +282,20 @@ the minimal cross-host demo #750 cites as working, cloned and served locally on
 port 8787.
 
 ```
-                                  spec            claude-desktop  claude-web      chatgpt         grok
-1 ui:// resource resolves         PASS            PASS            PASS            PASS            PASS
-2 CSP permits embedding & assets  PASS            PASS            PASS            PASS            PASS
-3 _meta.ui.domain origin          FAIL            FAIL            FAIL            INFO            INFO
-4 ui/initialize handshake         PASS            PASS            PASS            PASS            PASS
-5 ui/ready notification           PASS            PASS            PASS            PASS            PASS
-6 app-initiated tools/call        FAIL            FAIL            FAIL            FAIL            FAIL
-7 protocol revision               PASS            PASS            PASS            PASS            PASS
-8 tool-result redelivery          SKIP            SKIP            SKIP            SKIP            SKIP
-9 multi-instance isolation        PASS            PASS            PASS            PASS            PASS
-10 external navigation            INFO            INFO            INFO            INFO            INFO
+                                   spec            claude-desktop  claude-web      chatgpt         grok
+1 ui:// resource resolves          PASS            PASS            PASS            PASS            PASS
+2 CSP permits embedding & assets   PASS            PASS            PASS            PASS            PASS
+3 _meta.ui.domain origin           FAIL            FAIL            FAIL            INFO            INFO
+4 ui/initialize handshake          FAIL            FAIL            FAIL            FAIL            FAIL
+5 ui/ready notification            PASS            PASS            PASS            PASS            PASS
+6 app-initiated tools/call         FAIL            FAIL            FAIL            FAIL            FAIL
+7 protocol revision                PASS            PASS            PASS            PASS            PASS
+8 tool-result redelivery           SKIP            SKIP            SKIP            SKIP            SKIP
+9 multi-instance isolation         FAIL            FAIL            FAIL            FAIL            FAIL
+10 external navigation             SKIP            SKIP            SKIP            SKIP            SKIP
+12 declared CSP origins reachable  SKIP            SKIP            SKIP            SKIP            SKIP
 
-VERDICT: APP-FAULT — _meta.ui.domain origin, app-initiated tools/call fail(s) under the spec profile; fix the app/server before suspecting any host
+VERDICT: APP-FAULT — _meta.ui.domain origin, ui/initialize handshake, app-initiated tools/call, multi-instance isolation fail(s) under the spec profile; fix the app/server before suspecting any host
 ```
 
 Row 3 is the whole point of the matrix: the same observation is a FAIL on the
@@ -216,44 +304,60 @@ reported to derive that value. Read the detail line and the reason is concrete
 rather than mysterious:
 
 ```
-FAIL   3 _meta.ui.domain origin  declared "187f71d263d6cc8b3a92ca14ca4055b2.claudemcpcontent.com" but this
-                                 endpoint derives "1e7037d0e74fbc84d7746b9da9adb5bc.claudemcpcontent.com" —
-                                 that value is the hash of the same URL with the scheme swapped; recompute it
-                                 from the exact URL the connector was added with.
-SKIP   8 tool-result redelivery  tool is not argument-sensitive — it has no input property to vary between calls
-INFO  10 external navigation     blocked by sandbox (no allow-popups) — window.open blocked, target=_blank blocked
+FAIL   3 _meta.ui.domain origin   declared "187f71d263d6cc8b3a92ca14ca4055b2.claudemcpcontent.com" but this
+                                  endpoint derives "1e7037d0e74fbc84d7746b9da9adb5bc.claudemcpcontent.com" —
+                                  that value is the hash of the same URL with the scheme swapped; recompute it
+                                  from the exact URL the connector was added with.
+FAIL   4 ui/initialize handshake  the host REJECTED the app's ui/initialize (-32603: invalid_type at
+                                  params.appInfo) — appInfo and appCapabilities are both required in the params.
+SKIP   8 tool-result redelivery   tool is not argument-sensitive — it has no input property to vary between calls
+SKIP  12 declared CSP origins reachable  _meta.ui.csp declares no resourceDomains or connectDomains; nothing to probe
 ```
 
-Both spec failures are honest and specific to running it *locally*. That demo
-computes its domain from `https://<host>/mcp` because it is meant to sit behind
-an HTTPS tunnel, while this run reached it over plain `http://localhost:8787`
-— so check 3 correctly reports a scheme-swap near miss that would not occur
-behind the tunnel. Its `get_stats` widget is a static bar chart with no button,
-so nothing provokes an app-initiated `tools/call` (check 6) and there is no
-argument to vary (check 8 SKIPs rather than inventing a failure). None of this
-is a defect in that demo; it is what running a tunnel-shaped server on
-localhost actually looks like, and the tool says so in words you can act on.
+Every one of those is honest and specific. That demo computes its domain from
+`https://<host>/mcp` because it is meant to sit behind an HTTPS tunnel, while
+this run reached it over plain `http://localhost:8787`, so check 3 correctly
+reports a scheme-swap near miss that would not occur behind the tunnel. Its
+`ui/initialize` params predate the `appInfo`/`appCapabilities` requirement the
+current ext-apps SDK enforces, which is check 4, and because the widget sends
+`ui/notifications/initialized` without awaiting the reply it renders anyway and
+check 5 still passes. Check 9 is the same rejection hitting the second instance,
+and check 10 SKIPs because no app frame survived it. Its `get_stats` widget is a
+static bar chart with no button, so nothing provokes an app-initiated
+`tools/call` (check 6) and there is no argument to vary (check 8 SKIPs rather
+than inventing a failure).
 
-Here is the same thing against a fixture where every check resolves — note the
-two instances mounted side by side for check 9, the redelivery probe in the
-log, and the chips for checks 8-10 along the top:
+Check 12 is worth reading closely. The demo ships
+`csp: { connectDomains: [], resourceDomains: [] }` because the widget is
+self-contained, which is a declaration with nothing in it rather than no
+declaration at all, and the SKIP reason says which of the two it was. None of
+this is a defect in that demo; it is what a tunnel-shaped server, a widget older
+than the current SDK, and a self-contained bundle actually look like from here,
+and the tool says so in words you can act on.
 
-![profile mode: ten checks, two mounted instances, redelivery probe in the log](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/profile-spec.png)
+Here is the same thing against a fixture where every check resolves. Note the
+two instances mounted side by side for check 9, the redelivery probe and the
+check 12 probe in the log, and the chips for checks 8-10 and 12 along the top:
+
+![profile mode: eleven checks green, two mounted instances, the redelivery and CSP-origin probes in the log](https://raw.githubusercontent.com/Booyaka101/mcp-app-debug/main/demo/profile-spec.png)
 
 ### `--json` for an issue report
 
 `--profile … --json` emits `{verdict, profile, matrix, evidence[]}`, shaped so
 you can paste it straight into an ext-apps issue. `matrix.cells[row][col]`
 follows `matrix.checks` × `matrix.profiles`, and each `evidence` entry carries
-the observation plus the raw protocol frames behind it:
+the observation plus the raw protocol frames behind it. An entry gains
+`"blocking": true` when that failure is what took the exit code to `1`:
 
 ```json
 {"verdict":"APP-OK-HOST-SUSPECT","profile":"grok",
  "matrix":{"checks":["resource-uri","csp","ui-domain","ui-initialize","ui-ready","tool-call",
-                     "protocol-revision","tool-result-redelivery","multi-instance-isolation","external-navigation"],
+                     "protocol-revision","tool-result-redelivery","multi-instance-isolation","external-navigation",
+                     "resource-csp-effective"],
            "profiles":["spec","grok"],
            "cells":[["PASS","PASS"],["PASS","PASS"],["PASS","PASS"],["PASS","PASS"],["PASS","PASS"],
-                    ["PASS","PASS"],["PASS","PASS"],["PASS","FAIL"],["PASS","PASS"],["INFO","INFO"]]},
+                    ["PASS","PASS"],["PASS","PASS"],["PASS","FAIL"],["PASS","PASS"],["INFO","INFO"],
+                    ["SKIP","SKIP"]]},
  "evidence":[{"check":"tool-result-redelivery","profile":"spec",
               "observation":"PASS: second tool-result observed after 7ms (city: \"Tokyo-2\")","timestampMs":7,
               "rawMessages":["+946ms server event tools/call (redelivery probe) {\"city\":\"Tokyo-2\"}", "…"]},
@@ -371,13 +475,14 @@ app. A descriptor can turn it on for one profile instead of the whole run:
   "redeliversToolResult": true,
   "maxConcurrentInstances": 2,
   "honoursUiDomain": true,
+  "appliesResourceCsp": true,
   "toolNameRewrite": "alpha__",
   "sources": ["https://github.com/modelcontextprotocol/ext-apps/issues/745",
               "https://github.com/modelcontextprotocol/ext-apps/issues/753"]
 }
 ```
 
-`--profile all --aggregator` then prints an eleven-row matrix, with
+`--profile all --aggregator` then prints a twelve-row matrix, with
 `aggregator-safe-tool-names` in `matrix.checks` under `--json`.
 
 ### `hostContext.toolInfo`, with or without the flag
@@ -528,6 +633,10 @@ stayed passed for 2 s (pass `--full-window` to always wait the whole window).
 Exit codes: `0` all checks passed · `1` one or more checks failed ·
 `2` operational error (bad arguments, connection failed, browser failed).
 
+Under `--profile` the exit code follows the verdict: `1` for `APP-FAULT`, and
+`1` for `APP-OK-HOST-SUSPECT` when the failing check is blocking (check 12).
+See [the verdict table](#checks-8-10-and-12-profile-mode-only).
+
 For CI artifacts, `--log-file debug.ndjson` writes every protocol log entry
 as NDJSON (final line is the check report) and `--video session.webm`
 records the debug window — attach either to a bug report.
@@ -628,7 +737,7 @@ double-iframe sandbox files the package ships) with `--drop` (the
 pydantic-ai#6613 shape: no `capabilities.extensions`, tool-result `_meta`
 stripped) and `--list-only` modes.
 
-For profile and aggregator mode, `test/profile-server.mjs` ships ten
+For profile and aggregator mode, `test/profile-server.mjs` ships fourteen
 scenarios (HTTP or `--stdio`): `weather` (an argument-sensitive tool, so
 checks 8-10 all resolve), `first-only` (the varied second call errors — check
 8 FAILs), `leak` (a view that broadcasts its tool-result to sibling instances
@@ -640,24 +749,38 @@ bundle — check 11 FAILs under `--aggregator`), `resolved-names` (#753's
 `resolveToolName()` reading `hostContext.toolInfo.tool.name` — check 11 PASSes
 either way), `listed-names` (the same job done with a `tools/list` through the
 bridge, #745's other correct route) and `namespaced` (a tool already called
-`alpha__forecast` upstream, which must not be prefixed twice). `test/profiles/` holds descriptor
+`alpha__forecast` upstream, which must not be prefixed twice), `csp-origins`
+(a resource declaring one `resourceDomains` and one `connectDomains` origin,
+so check 12 PASSes under `spec` and FAILs under `claude-web`), `csp-wildcard`
+(a wildcard, a duplicate and a schemeless host in one list), `csp-paths` (one
+entry a path prefix, one naming an exact file), `csp-self-asset` (an app
+that really loads an image from the one origin it declared, served by the
+fixture itself, so under `claude-web` check 2 FAILs on the app's own asset
+while check 12 FAILs on the probe) and `csp-unmatchable` (a declared entry
+carrying userinfo, which Chromium parses and then matches against nothing, so
+check 12 FAILs under `spec` and blames the app). `test/profiles/` holds descriptor
 fixtures, including one with `sources: []` that must be refused at load, one
 that claims `popupsAllowed` while withholding the `allow-popups` token (check
 10 must catch it and blame the sandbox) and one that sets `toolNameRewrite`.
 
-`test/checks-unit.ts` asserts the checks 8-11 decision logic and the
-aggregator name mapping directly, for the branches a real browser cannot force
-reliably — a browser-level popup block as opposed to a sandbox-level one, a
+`test/checks-unit.ts` asserts the checks 8-12 decision logic, the CSP probe
+planner and the aggregator name mapping directly, for the branches a real
+browser cannot force reliably — a browser-level popup block as opposed to a
+sandbox-level one, a
 second instance that mounts but never completes its handshake, a bare name
 among otherwise correct calls. Those are exactly the branches whose wording a
 user acts on, so they are tested rather than left unexecuted.
 
 `npm test` asserts every scenario trips exactly the right checks on its
 revision (the shared scenarios trip identical check ids on both), plus
-strict-mode, stdio (both revisions), forced-`--protocol`, five host-mode cases,
-thirteen profile cases — a `--profile all` matrix snapshot, both honest SKIPs,
-profile-over-stdio, and per-profile artifact suffixing — and nine aggregator
-cases. It prints 52 `ok` lines: 51 scenario assertions plus one for the 44 unit
+strict-mode, stdio (both revisions), forced-`--protocol`, seven host-mode cases,
+twenty profile cases — a `--profile all` matrix snapshot, both honest SKIPs,
+profile-over-stdio, per-profile artifact suffixing, and seven check-12 cases
+covering a reachable declaration, the same one blocked under `claude-web`, a
+wildcard, a path prefix, a same-origin asset the app really loads (run under
+both profiles, so the probe is proven not to contaminate check 2) and a
+declaration no browser can match, which fails under `spec` and blames the app
+— and nine aggregator cases. It prints 59 `ok` lines: 58 scenario assertions plus one for the 72 unit
 assertions in `test/checks-unit.ts`. All green in CI on Linux and Windows.
 
 ## Architecture
@@ -695,7 +818,7 @@ npm install
 npm run build        # esbuild: node CLI bundle + 2 browser bundles
 npm run typecheck    # tsc, types only
 node dist/cli.js <server-url>
-npm test             # 51 scenario + 44 unit assertions, all must pass
+npm test             # 58 scenario + 72 unit assertions, all must pass
 ```
 
 A handy live target is the official example server:

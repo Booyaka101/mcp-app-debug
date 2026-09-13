@@ -1,6 +1,6 @@
 /**
- * Unit tests for the checks 8-11 decision logic (src/checks.ts) and the
- * aggregator name mapping (src/mcp/aggregator.ts).
+ * Unit tests for the checks 8-12 decision logic (src/checks.ts), the CSP probe
+ * planner (src/csp.ts) and the aggregator name mapping (src/mcp/aggregator.ts).
  *
  * The scenario suite drives these through a real browser, which covers the
  * paths a real server can produce — but several branches cannot be forced
@@ -14,9 +14,11 @@
 import {
   evaluateAggregatorCheck,
   evaluateChecks,
+  evaluateCspProbeCheck,
   evaluateProfileChecks,
   statusOf,
 } from "../src/checks.js";
+import { planCspProbes } from "../src/csp.js";
 import {
   createAggregator,
   DEFAULT_AGGREGATOR_PREFIX,
@@ -37,6 +39,7 @@ const PROFILE: ProfileDescriptor = {
   },
   popupsAllowed: false,
   redeliversToolResult: true,
+  appliesResourceCsp: true,
   maxConcurrentInstances: 2,
   honoursUiDomain: true,
   sources: ["https://example.invalid/unit"],
@@ -93,6 +96,18 @@ function check(
 ): void {
   const merged = { ...baseState(), ...state } as HarnessState;
   assertCheck(name, evaluateProfileChecks(merged, profile, 10), id, expectStatus, expectSubstring);
+}
+
+/** Deep-equal on anything JSON can render, for the assertions that are about a
+ * returned value rather than about a check's status line. */
+function assertEquals(name: string, actual: unknown, expected: unknown): void {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    failures++;
+    console.error(`FAIL unit: ${name}`);
+    console.error(`   - expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
+  } else {
+    console.log(`ok   unit: ${name}`);
+  }
 }
 
 /** Assert on the seven core checks, which run on every target. */
@@ -306,38 +321,273 @@ aggCheck("11 pass when the upstream name already carried the separator",
   },
   "pass", 'tool name "alpha__get-weather" already carries the "__" separator');
 
-/* ------------------------------------------- aggregator name mapping */
+/* ------------------------------- 12 declared CSP origins reachable */
 
-function assertAggregator(name: string, actual: unknown, expected: unknown): void {
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    failures++;
-    console.error(`FAIL unit: ${name}`);
-    console.error(`   - expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-  } else {
-    console.log(`ok   unit: ${name}`);
-  }
+type CspProbe = NonNullable<HarnessState["cspProbe"]>;
+
+const PROBE: CspProbe = {
+  pending: false,
+  appliesResourceCsp: true,
+  results: [],
+  invalid: [],
+  capped: 0,
+  requestsSeen: 0,
+  requestsFulfilled: 0,
+  requestsBlocked: 0,
+};
+
+function probed(
+  kind: CspProbe["results"][number]["kind"],
+  origin: string,
+  outcome: CspProbe["results"][number]["outcome"],
+  directive?: string,
+): CspProbe["results"][number] {
+  return {
+    kind,
+    declared: origin,
+    origin,
+    url: origin + "/__mcp-app-debug-probe",
+    wildcard: false,
+    outcome,
+    ...(directive ? { directive } : {}),
+  };
 }
+
+function probeCheck(
+  name: string,
+  cspProbe: Partial<CspProbe>,
+  expectStatus: string,
+  expectSubstring: string,
+): void {
+  const merged = { ...baseState(), cspProbe: { ...PROBE, ...cspProbe } } as HarnessState;
+  const result = evaluateCspProbeCheck(merged);
+  assertCheck(name, result ? [result] : [], "resource-csp-effective", expectStatus, expectSubstring);
+}
+
+// Scan mode never sets cspProbe, and a check that cannot run must not appear.
+assertEquals("12 is not evaluated outside profile mode", evaluateCspProbeCheck(baseState()), null);
+
+probeCheck("12 skips when the server declared nothing",
+  { skipped: "server declares no _meta.ui.csp; nothing to probe" },
+  "skip", "nothing to probe");
+
+probeCheck("12 skips rather than fails when the probe never settled",
+  { pending: true },
+  "skip", "did not settle");
+
+probeCheck("12 passes and names both halves",
+  {
+    results: [
+      probed("resource", "https://cdn.example.com", "allowed"),
+      probed("connect", "https://api.example.com", "allowed"),
+    ],
+  },
+  "pass",
+  "2/2 reachable inside the sandbox (resource https://cdn.example.com; connect https://api.example.com)");
+
+// The whole point of the check: under a profile that drops _meta.ui.csp the app
+// is not at fault, and the message has to say so.
+probeCheck("12 blames the host when the profile drops _meta.ui.csp",
+  {
+    appliesResourceCsp: false,
+    results: [
+      probed("resource", "https://cdn.example.com", "blocked", "img-src"),
+      probed("connect", "https://api.example.com", "blocked", "connect-src"),
+    ],
+  },
+  "fail",
+  "0/2 reachable; img-src blocked https://cdn.example.com/__mcp-app-debug-probe, " +
+    "connect-src blocked https://api.example.com/__mcp-app-debug-probe. " +
+    "This host does not apply _meta.ui.csp (ext-apps#761); the app is correct.");
+
+probeCheck("12 blames the declaration when the profile does apply it",
+  { results: [probed("connect", "https://api.example.com", "blocked", "connect-src")] },
+  "fail", "This profile does apply _meta.ui.csp, so the block is not the host knob");
+
+// Nothing was blocked, so nothing was learned. A 2 s timeout on a loaded
+// machine must not read as a broken app, or fail the build.
+probeCheck("12 reports a missing verdict as such rather than as a block",
+  { results: [probed("resource", "https://cdn.example.com", "unknown")] },
+  "info", "no verdict for https://cdn.example.com/__mcp-app-debug-probe within the probe window");
+
+probeCheck("12 does not block the exit code on a missing verdict alone",
+  { results: [probed("resource", "https://cdn.example.com", "unknown")] },
+  "info", "says nothing either way about the declaration");
+
+probeCheck("12 says which synthetic subdomain stood in for a wildcard",
+  {
+    results: [{
+      kind: "resource",
+      declared: "https://*.example.com",
+      origin: "https://mcp-app-debug-probe.example.com",
+      url: "https://mcp-app-debug-probe.example.com/__mcp-app-debug-probe",
+      wildcard: true,
+      outcome: "allowed",
+    }],
+  },
+  "pass", "wildcard https://*.example.com probed as https://mcp-app-debug-probe.example.com");
+
+probeCheck("12 reports entries it could not turn into a request",
+  { results: [probed("resource", "https://cdn.example.com", "allowed")], invalid: ["cdn.example.com"] },
+  "pass", "1 invalid entry/entries not probed (not a probeable origin): cdn.example.com");
+
+probeCheck("12 says when a declaration was too long to probe in full",
+  { results: [probed("resource", "https://cdn.example.com", "allowed")], capped: 4 },
+  "pass", "4 further declared origin(s) not probed (per-list cap)");
+
+// A correct app that still cannot reach its own CDN must not let CI go green,
+// which is what `blocking` carries into profile-run's exit code.
+{
+  const failed = evaluateCspProbeCheck({
+    ...baseState(),
+    cspProbe: {
+      ...PROBE,
+      appliesResourceCsp: false,
+      results: [probed("resource", "https://cdn.example.com", "blocked", "img-src")],
+    },
+  } as HarnessState);
+  assertEquals("12 marks a failure blocking", failed?.blocking, true);
+  const passed = evaluateCspProbeCheck({
+    ...baseState(),
+    cspProbe: { ...PROBE, results: [probed("resource", "https://cdn.example.com", "allowed")] },
+  } as HarnessState);
+  assertEquals("12 marks a pass non-blocking", passed?.blocking, undefined);
+}
+
+/* ---------------------------------------------------- 12 probe planning */
+
+// The three empty-plan reasons are what check 12 SKIPs with, and only one of
+// them means the server said nothing. primevalsoup/mcp-apps-claude-demo really
+// does ship `csp: {connectDomains: [], resourceDomains: []}`.
+assertEquals("no declaration plans no probe, and says so", planCspProbes(undefined),
+  { targets: [], invalid: [], capped: 0,
+    nothing: "server declares no _meta.ui.csp; nothing to probe" });
+
+assertEquals("two empty lists are a declaration, not a silence",
+  planCspProbes({ resourceDomains: [], connectDomains: [] }),
+  { targets: [], invalid: [], capped: 0,
+    nothing: "_meta.ui.csp declares no resourceDomains or connectDomains; nothing to probe" });
+
+assertEquals("frameDomains alone leaves nothing to request",
+  planCspProbes({ frameDomains: ["https://embed.example.com"] }).nothing,
+  "_meta.ui.csp declares no resourceDomains or connectDomains; nothing to probe");
+
+assertEquals("a plan with targets carries no reason", "nothing" in
+  planCspProbes({ resourceDomains: ["https://cdn.example.com"] }), false);
+
+assertEquals("each list is planned in order, resource first",
+  planCspProbes({
+    resourceDomains: ["https://cdn.example.com"],
+    connectDomains: ["https://api.example.com"],
+  }),
+  {
+    targets: [
+      {
+        kind: "resource",
+        declared: "https://cdn.example.com",
+        origin: "https://cdn.example.com",
+        url: "https://cdn.example.com/__mcp-app-debug-probe",
+        wildcard: false,
+      },
+      {
+        kind: "connect",
+        declared: "https://api.example.com",
+        origin: "https://api.example.com",
+        url: "https://api.example.com/__mcp-app-debug-probe",
+        wildcard: false,
+      },
+    ],
+    invalid: [],
+    capped: 0,
+  });
+
+// A source expression's path is part of the match. Probing the origin root of
+// `https://cdn.example.com/assets/` is blocked by a declaration that is correct,
+// so the probe goes under the declared prefix instead. Verified in Chromium.
+assertEquals("a path-prefix entry is probed under its own prefix",
+  planCspProbes({ resourceDomains: ["https://cdn.example.com/assets/"] }).targets[0].url,
+  "https://cdn.example.com/assets/__mcp-app-debug-probe");
+
+// The only URL that would match is the file itself, and this tool does not put
+// a request to a real origin on the wire to find out.
+assertEquals("an entry naming an exact file is not probed",
+  planCspProbes({ resourceDomains: ["https://cdn.example.com/logo.png"] }).invalid,
+  ["https://cdn.example.com/logo.png"]);
+
+assertEquals("two paths on one origin are two targets",
+  planCspProbes({ resourceDomains: ["https://cdn.example.com/", "https://cdn.example.com/a/"] })
+    .targets.map((t) => t.url),
+  ["https://cdn.example.com/__mcp-app-debug-probe",
+    "https://cdn.example.com/a/__mcp-app-debug-probe"]);
+
+assertEquals("a repeated origin is probed once per list",
+  planCspProbes({
+    resourceDomains: ["https://cdn.example.com", "https://cdn.example.com/"],
+  }).targets.length,
+  1);
+
+// The same origin in both lists is two different questions: img-src can allow
+// it while connect-src does not.
+assertEquals("the same origin in both lists is probed as both",
+  planCspProbes({
+    resourceDomains: ["https://x.example.com"],
+    connectDomains: ["https://x.example.com"],
+  }).targets.map((t) => t.kind),
+  ["resource", "connect"]);
+
+assertEquals("a wildcard is probed at a synthetic subdomain",
+  planCspProbes({ resourceDomains: ["https://*.example.com"] }).targets[0],
+  {
+    kind: "resource",
+    declared: "https://*.example.com",
+    origin: "https://mcp-app-debug-probe.example.com",
+    url: "https://mcp-app-debug-probe.example.com/__mcp-app-debug-probe",
+    wildcard: true,
+  });
+
+// CSP accepts all of these as source expressions; none of them is something a
+// request can be sent to, so they are reported rather than probed.
+assertEquals("keywords and schemeless hosts are reported as unprobeable",
+  planCspProbes({ resourceDomains: ["cdn.example.com", "*", "https:", "data:"] }),
+  { targets: [], invalid: ["cdn.example.com", "*", "https:", "data:"], capped: 0,
+    nothing: "_meta.ui.csp declares no origin a request can be sent to; nothing to probe " +
+      "(4 entry/entries are not a probeable origin: cdn.example.com, *, https:, data:)" });
+
+// Entries buildCspHeader itself drops never reach the policy, so probing them
+// would report a block the browser never actually applied.
+assertEquals("an entry the header sanitiser drops is not probed",
+  planCspProbes({ connectDomains: ["https://evil.example.com; script-src *"] }).invalid,
+  ["https://evil.example.com; script-src *"]);
+
+{
+  const many = Array.from({ length: 25 }, (_, i) => `https://cdn${i}.example.com`);
+  const plan = planCspProbes({ resourceDomains: many });
+  assertEquals("a long list is capped at 20 probes", plan.targets.length, 20);
+  assertEquals("the capped remainder is counted", plan.capped, 5);
+}
+
+/* ------------------------------------------- aggregator name mapping */
 
 {
   const agg = createAggregator(DEFAULT_AGGREGATOR_PREFIX, ["get-weather", "alpha__already"]);
-  assertAggregator("aggregator prefixes a bare name", agg.advertise("get-weather"), "alpha__get-weather");
-  assertAggregator("aggregator does not double-prefix", agg.advertise("alpha__already"), "alpha__already");
-  assertAggregator("aggregator derives the separator from the prefix", agg.separator, "__");
-  assertAggregator("aggregator resolves an advertised name", agg.upstream("alpha__get-weather"), "get-weather");
+  assertEquals("aggregator prefixes a bare name", agg.advertise("get-weather"), "alpha__get-weather");
+  assertEquals("aggregator does not double-prefix", agg.advertise("alpha__already"), "alpha__already");
+  assertEquals("aggregator derives the separator from the prefix", agg.separator, "__");
+  assertEquals("aggregator resolves an advertised name", agg.upstream("alpha__get-weather"), "get-weather");
   // The #745 failure: the bare name belongs to no namespace the gateway owns.
-  assertAggregator("aggregator owns no bare name", agg.upstream("get-weather"), undefined);
-  assertAggregator("aggregator rejects an unknown name", agg.upstream("alpha__nope"), undefined);
-  assertAggregator("aggregator recognises what it advertises", agg.isAdvertised("alpha__get-weather"), true);
+  assertEquals("aggregator owns no bare name", agg.upstream("get-weather"), undefined);
+  assertEquals("aggregator rejects an unknown name", agg.upstream("alpha__nope"), undefined);
+  assertEquals("aggregator recognises what it advertises", agg.isAdvertised("alpha__get-weather"), true);
 
   const dotted = createAggregator("gateway.", ["get-weather"]);
-  assertAggregator("a dotted prefix separates on the dot", dotted.advertise("get-weather"), "gateway.get-weather");
-  assertAggregator("a dotted prefix keeps its separator", dotted.separator, ".");
+  assertEquals("a dotted prefix separates on the dot", dotted.advertise("get-weather"), "gateway.get-weather");
+  assertEquals("a dotted prefix keeps its separator", dotted.separator, ".");
 }
 
 {
   const err = new UnknownNamespaceError("get-weather");
-  assertAggregator("the refusal carries the #745 code", err.code, -32043);
-  assertAggregator("the refusal carries the #745 message", err.message,
+  assertEquals("the refusal carries the #745 code", err.code, -32043);
+  assertEquals("the refusal carries the #745 message", err.message,
     'unknown name "get-weather": no upstream owns this namespace');
 }
 

@@ -12,6 +12,7 @@
   "redeliversToolResult": true,
   "maxConcurrentInstances": 2,
   "honoursUiDomain": false,
+  "appliesResourceCsp": true,
   "sources": [
     "https://github.com/modelcontextprotocol/ext-apps/issues/750",
     "https://github.com/modelcontextprotocol/ext-apps/issues/671"

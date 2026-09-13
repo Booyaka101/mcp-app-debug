@@ -12,6 +12,7 @@
   "redeliversToolResult": true,
   "maxConcurrentInstances": 2,
   "honoursUiDomain": true,
+  "appliesResourceCsp": true,
   "sources": [
     "https://github.com/modelcontextprotocol/ext-apps/issues/671",
     "https://github.com/modelcontextprotocol/ext-apps/blob/main/docs/csp-cors.md"

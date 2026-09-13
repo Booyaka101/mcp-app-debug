@@ -1,6 +1,6 @@
 {
   "name": "claude-web",
-  "description": "Community-observed claude.ai web knobs, not vendor documentation. Mirrors spec except that _meta.ui.domain is enforced — measured in a 36-render controlled A/B posted to ext-apps#671 (absent: mounts with a rotating origin; correct: mounts with a stable origin; wrong: 0/8 mounts).",
+  "description": "Community-observed claude.ai web knobs, not vendor documentation. Mirrors spec except that _meta.ui.domain is enforced — measured in a 36-render controlled A/B posted to ext-apps#671 (absent: mounts with a rotating origin; correct: mounts with a stable origin; wrong: 0/8 mounts) — and that the sandbox proxy never applies the resource's _meta.ui.csp (ext-apps#761), so declared resourceDomains/connectDomains do not reach the policy the sandbox is served.",
   "sandboxTokens": ["allow-scripts", "allow-same-origin", "allow-forms"],
   "csp": {
     "frameAncestors": "'self'",
@@ -12,8 +12,10 @@
   "redeliversToolResult": true,
   "maxConcurrentInstances": 2,
   "honoursUiDomain": true,
+  "appliesResourceCsp": false,
   "sources": [
     "https://github.com/modelcontextprotocol/ext-apps/issues/671",
-    "https://github.com/modelcontextprotocol/ext-apps/blob/main/docs/csp-cors.md"
+    "https://github.com/modelcontextprotocol/ext-apps/blob/main/docs/csp-cors.md",
+    "https://github.com/modelcontextprotocol/ext-apps/issues/761"
   ]
 }

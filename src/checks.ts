@@ -1,6 +1,6 @@
 /**
- * The 7 automated diagnostics, evaluated over the harness state collected
- * during the observation window.
+ * The 7 automated diagnostics, plus the profile-mode checks 8-12, evaluated
+ * over the harness state collected during the observation window.
  */
 import { checkAppDomain } from "./domain.js";
 import type { ProfileDescriptor } from "./profiles/index.js";
@@ -328,6 +328,15 @@ export function evaluateProfileChecks(
   return checks;
 }
 
+/** Result builder for the two standalone checks (11 and 12), which each own a
+ * single id and title. `blocking` forces exit 1 on a verdict that absolves the
+ * app; see profile-run.ts. */
+function resultFor(id: CheckResult["id"], title: string) {
+  return (status: CheckStatus, detail: string, blocking?: boolean): CheckResult => ({
+    id, title, pass: status !== "fail", status, detail, ...(blocking ? { blocking: true } : {}),
+  });
+}
+
 /**
  * Check 11 — aggregator-safe tool names. Returns null unless a name rewrite is
  * active (`--aggregator`, or a descriptor's `toolNameRewrite`): aggregation is
@@ -337,11 +346,7 @@ export function evaluateProfileChecks(
 export function evaluateAggregatorCheck(state: HarnessState): CheckResult | null {
   const agg = state.aggregator;
   if (!agg) return null;
-  const id = "aggregator-safe-tool-names" as const;
-  const title = "aggregator-safe tool names";
-  const result = (status: CheckStatus, detail: string): CheckResult => ({
-    id, title, pass: status !== "fail", status, detail,
-  });
+  const result = resultFor("aggregator-safe-tool-names", "aggregator-safe tool names");
 
   const bare = agg.appCalls.filter((c) => c.bare);
   if (bare.length > 0) {
@@ -376,6 +381,80 @@ export function evaluateAggregatorCheck(state: HarnessState): CheckResult | null
   return result("pass", `app resolved "${agg.advertised}" ${source} ${calls}`);
 }
 
+/**
+ * Check 12 — are the origins the server declared in `_meta.ui.csp` actually
+ * reachable from inside the sandbox? Check 2 only reports violations the app
+ * happened to provoke; this asks the question directly.
+ *
+ * Every request is answered by a local Playwright route, so "reachable" means
+ * the sandbox policy let the request out, never that the origin exists.
+ */
+export function evaluateCspProbeCheck(state: HarnessState): CheckResult | null {
+  const probe = state.cspProbe;
+  if (!probe) return null;
+  const result = resultFor("resource-csp-effective", "declared CSP origins reachable");
+
+  if (probe.skipped) return result("skip", probe.skipped);
+  if (probe.pending) return result("skip", "the probe did not settle before the window closed");
+
+  const reachable = probe.results.filter((r) => r.outcome === "allowed");
+  const notes = probeNotes(probe);
+  const tally = `${reachable.length}/${probe.results.length} reachable`;
+
+  if (reachable.length === probe.results.length) {
+    const listed = probe.results.map((r) => `${r.kind} ${r.declared}`).join("; ");
+    return result("pass", [`${tally} inside the sandbox (${listed})`, ...notes].join("; "));
+  }
+
+  const blocked = probe.results
+    .filter((r) => r.outcome !== "allowed")
+    .map((r) =>
+      r.outcome === "blocked"
+        ? `${r.directive ?? "CSP"} blocked ${r.url}`
+        : `no verdict for ${r.url} within the probe window`,
+    )
+    .join(", ");
+  // A probe that never came back is not evidence of a block, and must not fail
+  // a run on its own: that would make a slow machine look like a broken app.
+  if (probe.results.every((r) => r.outcome !== "blocked")) {
+    return result(
+      "info",
+      [
+        `${tally}; ${blocked}. The probe reached no verdict in time, which says ` +
+          `nothing either way about the declaration.`,
+        ...notes,
+      ].join(" "),
+    );
+  }
+  const attribution = probe.appliesResourceCsp
+    ? "This profile does apply _meta.ui.csp, so the block is not the host knob. " +
+      "The declared entry does not cover the request that was made."
+    : "This host does not apply _meta.ui.csp (ext-apps#761); the app is correct.";
+  return result(
+    "fail",
+    [`${tally}; ${blocked}. ${attribution}`, ...notes].join(" "),
+    true,
+  );
+}
+
+function probeNotes(probe: NonNullable<HarnessState["cspProbe"]>): string[] {
+  const notes: string[] = [];
+  const wildcards = probe.results.filter((r) => r.wildcard);
+  if (wildcards.length > 0) {
+    notes.push(`wildcard ${wildcards.map((r) => `${r.declared} probed as ${r.origin}`).join(", ")}`);
+  }
+  if (probe.invalid.length > 0) {
+    notes.push(
+      `${probe.invalid.length} invalid entry/entries not probed ` +
+        `(not a probeable origin): ${probe.invalid.join(", ")}`,
+    );
+  }
+  if (probe.capped > 0) {
+    notes.push(`${probe.capped} further declared origin(s) not probed (per-list cap)`);
+  }
+  return notes;
+}
+
 export function buildReport(
   state: HarnessState,
   meta: { server: string; tool: string; mode: string },
@@ -389,6 +468,8 @@ export function buildReport(
     : evaluateChecks(state);
   const aggregatorCheck = evaluateAggregatorCheck(state);
   if (aggregatorCheck) checks.push(aggregatorCheck);
+  const cspProbeCheck = evaluateCspProbeCheck(state);
+  if (cspProbeCheck) checks.push(cspProbeCheck);
   return {
     ...meta,
     passed: checks.filter((c) => statusOf(c) === "pass").length,

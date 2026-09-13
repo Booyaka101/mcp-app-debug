@@ -28,6 +28,11 @@ export const ProfileDescriptorSchema = z.object({
   redeliversToolResult: z.boolean(),
   maxConcurrentInstances: z.number().int().min(1),
   honoursUiDomain: z.boolean(),
+  /** the host's sandbox proxy reads the resource's `_meta.ui.csp` and folds
+   * resourceDomains/connectDomains into the policy it serves. `false` models
+   * ext-apps#761, where the proxy drops it — enables check 12's FAIL. Defaults
+   * to true so third-party descriptors written before 0.8.0 keep loading. */
+  appliesResourceCsp: z.boolean().default(true),
   /** the host fronts its servers with a namespacing aggregator, advertising
    * every tool as `<prefix><name>` (ext-apps#745, #753) — enables check 11.
    * Absent or null means no rewrite, and `--aggregator` then decides. */
