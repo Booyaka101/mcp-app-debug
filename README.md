@@ -69,10 +69,11 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
   PASS  ui/ready notification          app signaled ready in 51 ms
   PASS  app-initiated tools/call       app called "get-time" → non-error result (1 app call(s) total)
   PASS  protocol revision              negotiated 2025-11-25 via initialize (legacy path); server/discover not implemented (legitimate during the 12-month deprecation window)
-  7/7 checks passed OK
+  PASS  server declares io.modelcontextprotocol/ui  declared in the initialize result's capabilities.extensions
+  8/8 checks passed OK
 ```
 
-## The 7 checks
+## The 8 checks
 
 1. **ui:// resource resolves** — the tool's `_meta.ui.resourceUri` is a valid
    `ui://` URI and `resources/read` returns exactly one
@@ -104,12 +105,19 @@ Results — server http://localhost:3001/mcp, tool get-time, mode trusted
    the first button in your app (or the one you name with `--click <text>`) to
    provoke real app activity.
 7. **protocol revision** — the protocol negotiation succeeded cleanly. Reports
-   which revision was negotiated, whether `server/discover` answered, and
-   whether the server advertises `io.modelcontextprotocol/ui` in
-   `capabilities.extensions`. FAILs when a server speaks 2026-07-28 but does
-   not implement `server/discover` (a MUST in that revision). A 2025-11-25
-   server passes with a note — legitimate during the 12-month deprecation
-   window.
+   which revision was negotiated and whether `server/discover` answered. FAILs
+   when a server speaks 2026-07-28 but does not implement `server/discover` (a
+   MUST in that revision). A 2025-11-25 server passes with a note, legitimate
+   during the 12-month deprecation window.
+13. **server declares io.modelcontextprotocol/ui** — the server advertises the
+   extension in its own `capabilities.extensions`, read from `server/discover`
+   on 2026-07-28 and from the `initialize` result on 2025-11-25. `registerAppTool`
+   and `registerAppResource` do not declare it for you: they set the tool `_meta`
+   and the resource mime type and register no capability. A host that gates on
+   the extension will then fetch nothing and mount nothing, which is
+   indistinguishable from a host-side render bug
+   ([claude-ai-mcp#165](https://github.com/anthropics/claude-ai-mcp/issues/165)).
+   SKIPs rather than passes when the capabilities cannot be read.
 
 Beyond the checks, the log surfaces the evidence silent failures hide: app
 `console.error`s, uncaught exceptions, failed network requests, CSP violation

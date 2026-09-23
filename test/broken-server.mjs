@@ -23,8 +23,10 @@
  * Stateless-only scenarios:
  *   discover-missing  speaks stateless 2026-07-28 but server/discover -32601s
  *                     (half-migrated server; violates a MUST)      → fails (g)
- *   no-ui-extension   discover result omits io.modelcontextprotocol/ui from
- *                     capabilities.extensions                      → (g) passes with a warning detail
+ * Both revisions:
+ *   no-ui-extension   the server omits io.modelcontextprotocol/ui from its
+ *                     capabilities.extensions (server/discover on 2026-07-28,
+ *                     the initialize result on 2025-11-25)          → fails (h)
  */
 import http from "node:http";
 import { createHash } from "node:crypto";
@@ -38,7 +40,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 
-const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "bad-init-params", "tool-error", "csp-meta", "ext-img", "bad-domain"];
+const SCENARIOS = ["ok", "bad-uri", "bad-mime", "no-ready", "slow-init", "bad-init-params", "tool-error", "csp-meta", "ext-img", "bad-domain", "no-ui-extension"];
 const STATELESS_SCENARIOS = ["ok", "bad-uri", "no-ready", "tool-error", "discover-missing", "no-ui-extension"];
 const stdioMode = process.argv.includes("--stdio");
 const statelessMode = process.argv.includes("--stateless");
@@ -94,7 +96,13 @@ function appHtml({
 }
 
 function buildServer() {
-  const server = new McpServer({ name: `broken-server (${scenario})`, version: "1.0.0" });
+  const server = new McpServer(
+    { name: `broken-server (${scenario})`, version: "1.0.0" },
+    // registerAppTool/registerAppResource do not declare this; the server must
+    scenario === "no-ui-extension"
+      ? {}
+      : { capabilities: { extensions: { "io.modelcontextprotocol/ui": {} } } },
+  );
   const declaredUri = "ui://broken/app.html";
   const actualUri = scenario === "bad-uri" ? "ui://broken/elsewhere.html" : declaredUri;
 

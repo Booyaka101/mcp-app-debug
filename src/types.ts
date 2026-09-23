@@ -113,6 +113,7 @@ export interface CheckResult {
     | "ui-ready"
     | "tool-call"
     | "protocol-revision"
+    | "ui-extension-declared"
     | "tool-result-redelivery"
     | "multi-instance-isolation"
     | "external-navigation"
@@ -148,6 +149,7 @@ export const CHECK_NUMBERS: Record<CheckResult["id"], number> = {
   "external-navigation": 10,
   "aggregator-safe-tool-names": 11,
   "resource-csp-effective": 12,
+  "ui-extension-declared": 13,
 };
 
 export interface CheckReport {

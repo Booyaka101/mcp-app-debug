@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.9.0 — 2026-09-21
+
+**The harness passed a server that could never have rendered.**
+
+In [claude-ai-mcp#165](https://github.com/anthropics/claude-ai-mcp/issues/165),
+@cau-citcwalker reported a remote connector that showed an empty frame in Claude
+for weeks, and cited this harness passing the same live server 5/5 as evidence
+the fault was host-side. The fault was not host-side. The server never declared
+`capabilities.extensions["io.modelcontextprotocol/ui"]`, and this harness should
+have said so.
+
+It knew, and did not say. `uiExtensionAdvertised` was computed on the 2026-07-28
+`server/discover` path and rendered only as a clause inside check 7's detail
+string, while check 7's verdict was decided entirely by whether `server/discover`
+was implemented. On the 2025-11-25 `initialize` path, which is the one that
+reporter was on, the server's capabilities were never read at all: the code
+asserted that legacy has no extensions vocabulary, which is wrong, the map is in
+the initialize result.
+
+### Added
+
+- **Check 13, `server declares io.modelcontextprotocol/ui`.** Its own check with
+  its own verdict, on both revisions. Reads `server/discover` capabilities on
+  2026-07-28 and the `initialize` result on 2025-11-25. FAILs when the extension
+  is absent, SKIPs when the capabilities cannot be read, and never passes on
+  silence. The detail names the trap: `registerAppTool` and `registerAppResource`
+  set the tool `_meta` and the resource mime type and register no capability.
+
+### Changed
+
+- Check 7 (`protocol revision`) no longer mentions the extension. It was the
+  wrong place to read it and a failure there sends you to debug your revision.
+- The legacy `initialize` path now populates `uiExtensionAdvertised` instead of
+  leaving it undefined.
+
+### Fixed
+
+- Both test fixtures had the bug they were meant to catch. `test/broken-server.mjs`
+  and `test/profile-server.mjs` are built with `registerAppTool`/`registerAppResource`
+  as documented and never declared the capability, so every legacy and profile
+  scenario in the suite was a server that would not render in Claude, and the
+  suite was green. A new legacy `no-ui-extension` scenario now covers the
+  reporter's case directly.
+
 ## 0.8.0 — 2026-09-13
 
 **Check 2 reads the CSP. Check 12 tries it.**
