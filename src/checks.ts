@@ -194,12 +194,8 @@ export function evaluateChecks(state: HarnessState, profile?: ProfileDescriptor)
         `${n.notes[0] ?? "server/discover is not implemented"} — ` +
         "the 2026-07-28 revision makes server/discover a MUST";
     } else if (n.revision === "2026-07-28") {
-      const uiPart = n.uiExtensionAdvertised
-        ? "server advertises io.modelcontextprotocol/ui"
-        : "server does NOT advertise io.modelcontextprotocol/ui in capabilities.extensions — " +
-          "hosts that gate on the extension will not offer this app";
       const extras = n.notes.length > 0 ? `; ${n.notes.join("; ")}` : "";
-      detail = `negotiated 2026-07-28 via server/discover; ${uiPart}${extras}`;
+      detail = `negotiated 2026-07-28 via server/discover${extras}`;
     } else {
       const discoverPart = n.notes[0] ?? "server/discover not implemented";
       detail =
@@ -207,6 +203,46 @@ export function evaluateChecks(state: HarnessState, profile?: ProfileDescriptor)
         "(legitimate during the 12-month deprecation window)";
     }
     checks.push({ id: "protocol-revision", title: "protocol revision", pass, detail });
+  }
+
+  // (h) the server declares the UI extension. The binding on the tool is not
+  // the declaration: ext-apps' registerAppTool/registerAppResource set _meta and
+  // the resource mime type and register no capability, so a server can serve a
+  // perfect ui:// resource and still never be offered a frame by a host that
+  // gates on the extension (claude-ai-mcp#165).
+  {
+    const n = state.negotiated;
+    const advertised = n?.uiExtensionAdvertised;
+    const where =
+      n?.revision === "2026-07-28"
+        ? "server/discover capabilities.extensions"
+        : "the initialize result's capabilities.extensions";
+    let status: CheckStatus;
+    let detail: string;
+    if (advertised === true) {
+      status = "pass";
+      detail = `server declares io.modelcontextprotocol/ui in ${where}`;
+    } else if (advertised === false) {
+      status = "fail";
+      detail =
+        `server does NOT declare io.modelcontextprotocol/ui in ${where} — ` +
+        "a host that gates on the extension will fetch nothing and mount nothing, " +
+        "which looks identical to a render bug. registerAppTool/registerAppResource " +
+        "do not declare it for you; set it on the server's own capabilities";
+    } else {
+      status = "skip";
+      detail =
+        "could not read the server's capabilities" +
+        (n ? " on this connection path" : " (connection failed earlier)") +
+        " — the declaration is unverified, not absent";
+    }
+    checks.push({
+      id: "ui-extension-declared",
+      title: "server declares io.modelcontextprotocol/ui",
+      pass: status !== "fail",
+      status,
+      detail,
+    });
   }
 
   return checks;

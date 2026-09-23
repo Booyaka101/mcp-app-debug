@@ -59,9 +59,11 @@ export interface NegotiatedProtocol {
   via: "server/discover" | "initialize" | "stateless probe";
   /** whether the server answered server/discover (a MUST on 2026-07-28) */
   discoverImplemented: boolean;
-  /** whether server/discover advertised io.modelcontextprotocol/ui in
-   * capabilities.extensions; undefined when unknowable (legacy has no
-   * extensions vocabulary; the stateless-probe path has no discover result) */
+  /** whether the server advertised io.modelcontextprotocol/ui in
+   * capabilities.extensions, via server/discover on 2026-07-28 or the
+   * initialize result on 2025-11-25; undefined only when unknowable (the
+   * stateless-probe path has no discover result, and a failed handshake has no
+   * capabilities) */
   uiExtensionAdvertised?: boolean;
   serverInfo?: { name: string; version?: string };
   /** extra findings surfaced in the protocol-revision check detail */
@@ -227,6 +229,16 @@ export async function legacyConnect(
   if (serverVersion) {
     negotiated.serverInfo = { name: serverVersion.name, version: serverVersion.version };
   }
+
+  // 2025-11-25 carries the server's extensions map in the initialize result, so
+  // the declaration is observable on this path too — an absent map is a definite
+  // "not advertised", not an unknown.
+  const serverCaps = client.getServerCapabilities() as
+    | { extensions?: Record<string, unknown> }
+    | undefined;
+  negotiated.uiExtensionAdvertised = serverCaps
+    ? UI_EXTENSION_ID in (serverCaps.extensions ?? {})
+    : undefined;
 
   return {
     transportKind,

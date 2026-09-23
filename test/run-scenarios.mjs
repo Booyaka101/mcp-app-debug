@@ -36,6 +36,14 @@ const EXPECTATIONS = {
   "csp-meta": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
   "ext-img": { mustFail: ["csp"], mustPass: ["resource-uri", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
   "bad-domain": { mustFail: ["ui-domain"], mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"] },
+  // claude-ai-mcp#165: a spec-correct ui:// resource on a server that never
+  // declared the extension. Every other check passes, which is what made it
+  // look like a host bug for weeks.
+  "no-ui-extension": {
+    mustFail: ["ui-extension-declared"],
+    mustPass: ["resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"],
+    detailContains: { "ui-extension-declared": "the initialize result's capabilities.extensions" },
+  },
 };
 
 // The same broken-server scenarios under the stateless 2026-07-28 revision
@@ -55,9 +63,9 @@ const STATELESS_EXPECTATIONS = {
     detailContains: { "protocol-revision": "server/discover" },
   },
   "no-ui-extension": {
-    mustFail: [],
+    mustFail: ["ui-extension-declared"],
     mustPass: ["resource-uri", "csp", "ui-initialize", "ui-ready", "tool-call", "protocol-revision"],
-    detailContains: { "protocol-revision": "does NOT advertise io.modelcontextprotocol/ui" },
+    detailContains: { "ui-extension-declared": "server/discover capabilities.extensions" },
   },
 };
 
@@ -638,7 +646,7 @@ await profileCase("profile-popups-broken", {
   },
 });
 
-// --profile all: 11-row × 5-column matrix snapshot + verdict
+// --profile all: 12-row × 5-column matrix snapshot + verdict
 // grok fails check 8 by descriptor (redeliversToolResult:false), so a healthy
 // app under --profile all is APP-OK-HOST-SUSPECT, not APP-OK.
 await profileCase("profile-all-matrix-snapshot", {
@@ -648,11 +656,13 @@ await profileCase("profile-all-matrix-snapshot", {
     matrixSnapshot: {
       checks: [
         "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call",
-        "protocol-revision", "tool-result-redelivery", "multi-instance-isolation", "external-navigation",
+        "protocol-revision", "ui-extension-declared", "tool-result-redelivery",
+        "multi-instance-isolation", "external-navigation",
         "resource-csp-effective",
       ],
       profiles: ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"],
       cells: [
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
@@ -856,12 +866,12 @@ await profileCase("profile-csp-unmatchable-spec", {
   }
   if (out) {
     if (out.verdict !== "APP-OK") problems.push(`expected APP-OK, got ${out.verdict}`);
-    if (out.matrix.checks.length !== 11) problems.push(`expected 11 rows, got ${out.matrix.checks.length}`);
+    if (out.matrix.checks.length !== 12) problems.push(`expected 12 rows, got ${out.matrix.checks.length}`);
     const row = out.matrix.checks.indexOf("tool-result-redelivery");
     if (out.matrix.cells[row][0] !== "PASS") problems.push(`expected check 8 PASS over stdio, got ${out.matrix.cells[row][0]}`);
   }
   if (code !== 0) problems.push(`expected exit 0, got ${code}`);
-  problems.length ? fail("profile-stdio", problems) : console.log("ok   profile-stdio (APP-OK, 11 rows)");
+  problems.length ? fail("profile-stdio", problems) : console.log("ok   profile-stdio (APP-OK, 12 rows)");
 }
 
 // --profile with artifacts: one file per profile, suffixed with its name.
@@ -1009,7 +1019,7 @@ await profileCase("profile-aggregator-descriptor", {
   },
 });
 
-// --profile all --aggregator: twelve rows, and row 11 in matrix.checks.
+// --profile all --aggregator: thirteen rows, and the aggregator row in matrix.checks.
 await profileCase("profile-all-aggregator-matrix", {
   scenario: "resolved-names", port: 3428, profile: "all", extraArgs: ["--aggregator"],
   expect: {
@@ -1017,11 +1027,13 @@ await profileCase("profile-all-aggregator-matrix", {
     matrixSnapshot: {
       checks: [
         "resource-uri", "csp", "ui-domain", "ui-initialize", "ui-ready", "tool-call",
-        "protocol-revision", "tool-result-redelivery", "multi-instance-isolation",
+        "protocol-revision", "ui-extension-declared", "tool-result-redelivery",
+        "multi-instance-isolation",
         "external-navigation", "aggregator-safe-tool-names", "resource-csp-effective",
       ],
       profiles: ["spec", "claude-desktop", "claude-web", "chatgpt", "grok"],
       cells: [
+        ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],
         ["PASS", "PASS", "PASS", "PASS", "PASS"],

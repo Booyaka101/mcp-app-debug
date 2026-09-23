@@ -181,7 +181,11 @@ ${asset ? `<img src="http://localhost:${port}/asset.png" width="8" height="8" al
 }
 
 function buildServer() {
-  const server = new McpServer({ name: `profile-server (${scenario})`, version: "1.0.0" });
+  const server = new McpServer(
+    { name: `profile-server (${scenario})`, version: "1.0.0" },
+    // registerAppTool/registerAppResource do not declare this; the server must
+    { capabilities: { extensions: { "io.modelcontextprotocol/ui": {} } } },
+  );
   const uri = "ui://profile/app.html";
 
   registerAppTool(
