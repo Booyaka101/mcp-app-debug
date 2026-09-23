@@ -58,7 +58,7 @@ jobs:
             const r = JSON.parse(require('fs').readFileSync('profiles.json', 'utf8').replace(/^﻿/, ''));
             const row = r.matrix.checks.indexOf('tool-result-redelivery');
             const csp = r.matrix.checks.indexOf('resource-csp-effective');
-            if (r.matrix.checks.length !== 11) throw new Error('expected 11 rows, got ' + r.matrix.checks.length);
+            if (r.matrix.checks.length !== 12) throw new Error('expected 12 rows, got ' + r.matrix.checks.length);
             if (r.verdict !== 'APP-OK-HOST-SUSPECT') throw new Error('expected APP-OK-HOST-SUSPECT, got ' + r.verdict);
             if (r.matrix.cells[row].join() !== 'PASS,FAIL') throw new Error('expected check 8 PASS,FAIL got ' + r.matrix.cells[row].join());
             if (r.matrix.cells[csp].join() !== 'SKIP,SKIP') throw new Error('expected check 12 SKIP,SKIP got ' + r.matrix.cells[csp].join());
