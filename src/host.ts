@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { chromium, type Browser, type Frame, type Page } from "playwright";
+import { ToolSchema } from "@modelcontextprotocol/core";
 import {
   buildReport,
   evaluateAggregatorCheck,
@@ -343,7 +344,8 @@ export async function runScanOnce(opts: HostOptions): Promise<ScanOutcome> {
     toolName: tool.name,
     toolTitle: tool.title,
     toolArgs,
-    toolDefinition: tool as unknown as Record<string, unknown>,
+    // Validate legacy SDK tools against the schema required by the v2 bridge.
+    toolDefinition: ToolSchema.parse(tool),
     aggregatorPrefix: conn.aggregator?.prefix,
     mode: opts.mode,
     modeNote: opts.modeNote,

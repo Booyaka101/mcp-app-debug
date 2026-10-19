@@ -2,6 +2,7 @@
  * Shared types between the Node CLI/harness and the browser-side host page.
  */
 import type { CspProbeTarget } from "./csp.js";
+import type { Tool } from "@modelcontextprotocol/client";
 
 /** One row in the protocol log (side panel + Node collection). */
 export interface LogEntry {
@@ -50,7 +51,7 @@ export interface HarnessConfig {
   /** hostContext.toolInfo.tool: the tool this run resolved, under the
    * advertised name (2026-01-26 apps spec, "Metadata of the tool call that
    * instantiated the View") */
-  toolDefinition: Record<string, unknown>;
+  toolDefinition: Tool;
   mode: "trusted" | "strict";
   modeNote?: string;
   sandboxUrl: string;
