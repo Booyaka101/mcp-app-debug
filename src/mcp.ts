@@ -76,7 +76,7 @@ export function findUiTools(tools: Tool[]): UiTool[] {
   const result: UiTool[] = [];
   for (const tool of tools) {
     try {
-      const uri = getToolUiResourceUri(tool);
+      const uri = getToolUiResourceUri({ _meta: tool._meta });
       if (uri) result.push({ tool, resourceUri: uri });
     } catch (e) {
       result.push({ tool, uriError: e instanceof Error ? e.message : String(e) });

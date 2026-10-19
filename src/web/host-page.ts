@@ -13,6 +13,7 @@ import {
   AppBridge,
   PostMessageTransport,
   buildAllowAttribute,
+  type McpUiHostContext,
 } from "@modelcontextprotocol/ext-apps/app-bridge";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ListToolsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -356,7 +357,7 @@ class LoggingTransport implements Transport {
  * harness mounts the view from resources/read and only then simulates the
  * model's tools/call, so the request id does not exist yet at handshake time.
  */
-function hostContext(config: HarnessConfig): Record<string, unknown> {
+function hostContext(config: HarnessConfig): McpUiHostContext {
   return {
     toolInfo: { tool: config.toolDefinition },
     theme: "light",

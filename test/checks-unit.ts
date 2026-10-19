@@ -19,6 +19,9 @@ import {
   statusOf,
 } from "../src/checks.js";
 import { planCspProbes } from "../src/csp.js";
+import { ToolSchema } from "@modelcontextprotocol/core";
+import type { Tool } from "@modelcontextprotocol/sdk/types.js";
+import { getToolUiResourceUri } from "@modelcontextprotocol/ext-apps/app-bridge";
 import {
   createAggregator,
   DEFAULT_AGGREGATOR_PREFIX,
@@ -109,6 +112,15 @@ function assertEquals(name: string, actual: unknown, expected: unknown): void {
     console.log(`ok   unit: ${name}`);
   }
 }
+
+const legacyTool: Tool = {
+  name: "forecast",
+  inputSchema: { type: "object", properties: { city: { type: "string" } } },
+  _meta: { ui: { resourceUri: "ui://weather/app.html" } },
+};
+assertEquals("v2 bridge preserves legacy tool definitions", ToolSchema.parse(legacyTool), legacyTool);
+assertEquals("v2 bridge reads legacy tool UI metadata", getToolUiResourceUri({ _meta: legacyTool._meta }), "ui://weather/app.html");
+assertEquals("v2 bridge rejects incomplete tool definitions", ToolSchema.safeParse({ name: "forecast" }).success, false);
 
 /** Assert on the seven core checks, which run on every target. */
 function coreCheck(
